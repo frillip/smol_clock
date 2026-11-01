@@ -149,8 +149,8 @@ void fe_build_ntp_string(void)
 
 void setup()
 {
-  esp_task_wdt_init(WDT_TIMEOUT, true); //enable panic so ESP32 restarts
-  esp_task_wdt_add(NULL); //add current thread to WDT watch
+  //esp_task_wdt_init(WDT_TIMEOUT, true); //enable panic so ESP32 restarts
+  //esp_task_wdt_add(NULL); //add current thread to WDT watch
   
   uint32_t id = 0;
   for(int i=0; i<17; i=i+8) {
@@ -194,25 +194,23 @@ void setup()
     wm.setSaveConfigCallback(startNTPqueries);
   }
 
-  scheduler_timer = timerBegin(SCHEDULER_HW_TIMER, 80, true);
-  timerAttachInterrupt(scheduler_timer, &scheduler_1ms, true);
-  timerAlarmWrite(scheduler_timer, 1000, true);
-  timerAlarmEnable(scheduler_timer);
+  scheduler_timer = timerBegin(1000000);
+  timerAttachInterrupt(scheduler_timer, &scheduler_1ms);
+  timerAlarm(scheduler_timer, 1000, true, 0);
 
   pinMode(PPS_OUT_PIN, OUTPUT);
   digitalWrite(PPS_OUT_PIN, 0);
 
-  pps_timer = timerBegin(PPS_HW_TIMER, 80, true);
-  timerAttachInterrupt(pps_timer, &pps_out, true);
-  timerAlarmWrite(pps_timer, 1000000, true);
-  timerAlarmEnable(pps_timer);
+  pps_timer = timerBegin(1000000);
+  timerAttachInterrupt(pps_timer, &pps_out);
+  timerAlarm(pps_timer, 1000000, true, 0);
 }
 
 void loop()
 {
   if(secondChanged())
   {
-    esp_task_wdt_reset();
+    //esp_task_wdt_reset();
     if(!pps_sync)
     {
       if(timeStatus() == timeSet && !UTC.ms())
