@@ -4,8 +4,9 @@
 #include <string.h>
 
 // ---- Message table --------------------------------------------------------
-// Field sizes in wire order, as in sml_proto.h. The host tests check that
-// each layout adds up to the struct size and to the length in the table.
+// Field sizes in wire order, as in sml_proto.h: 2 and 4 are big-endian
+// integers, any other size that many bytes as they are. The host tests check
+// that each layout adds up to the struct size and to the length in the table.
 
 #define TZ_ENTRY_FIELDS      4, 4, 2, 1, 1
 #define SETTINGS_BODY_FIELDS 2, 2, 4, 4, 4, 4, 4, 2, 1, 1
@@ -58,6 +59,14 @@ static const uint8_t layout_stat_settings[] = {2, 2, 4, SETTINGS_BODY_FIELDS, 0}
 static const uint8_t layout_cmd_user[] = {2, 2, 2, 4, 0};
 static const uint8_t layout_cmd_response[] = {2, 2, 2, 2, 4, 0};
 static const uint8_t layout_cmd_settings[] = {2, 2, 2, 4, SETTINGS_BODY_FIELDS, 0};
+static const uint8_t layout_boot_status[] = {4, 1, 1, 2, 2, 2, 4, 4, 4, 4, 4,
+                                             4, 4, 4, 1, 1, 2, 1, 1, 2, 4, 0};
+static const uint8_t layout_boot_command[] = {2, 1, 1, 4, 4, 4, 4, 4, 4, 2, 2, 0};
+static const uint8_t layout_boot_response[] = {2, 2, 2, 1, 1, 4, 0};
+static const uint8_t layout_boot_data[] = {4, 1, 3, 4, SML_BOOT_CHUNK_BYTES, 0};
+static const uint8_t layout_boot_data_response[] = {2, 2, 4, 4, 0};
+static const uint8_t layout_boot_verify[] = {4, 4, 0};
+static const uint8_t layout_boot_verify_response[] = {2, 2, 4, 4, SML_BOOT_CHUNK_BYTES, 0};
 static const uint8_t layout_text[] = {0};
 
 #define PIC SML_FROM_PIC
@@ -91,6 +100,19 @@ static const SmlMessage messages[] = {
      "CMD-RESPONSE"},
     {SML_CLASS_CMD, SML_CMD_SETTINGS, SML_CMD_SETTINGS_BYTES, ESP, layout_cmd_settings,
      "CMD-SETTINGS"},
+    {SML_CLASS_BOOT, SML_BOOT_STATUS, SML_BOOT_STATUS_BYTES, PIC, layout_boot_status,
+     "BOOT-STATUS"},
+    {SML_CLASS_BOOT, SML_BOOT_COMMAND, SML_BOOT_COMMAND_BYTES, ESP, layout_boot_command,
+     "BOOT-COMMAND"},
+    {SML_CLASS_BOOT, SML_BOOT_RESPONSE, SML_BOOT_RESPONSE_BYTES, PIC, layout_boot_response,
+     "BOOT-RESPONSE"},
+    {SML_CLASS_BOOT, SML_BOOT_DATA, SML_BOOT_DATA_BYTES, ESP, layout_boot_data, "BOOT-DATA"},
+    {SML_CLASS_BOOT, SML_BOOT_DATA_RESPONSE, SML_BOOT_DATA_RESPONSE_BYTES, PIC,
+     layout_boot_data_response, "BOOT-DATA-RESPONSE"},
+    {SML_CLASS_BOOT, SML_BOOT_VERIFY, SML_BOOT_VERIFY_BYTES, ESP, layout_boot_verify,
+     "BOOT-VERIFY"},
+    {SML_CLASS_BOOT, SML_BOOT_VERIFY_RESPONSE, SML_BOOT_VERIFY_RESPONSE_BYTES, PIC,
+     layout_boot_verify_response, "BOOT-VERIFY-RESPONSE"},
 };
 
 #undef PIC
@@ -170,7 +192,8 @@ uint32_t sml_get_u32(const uint8_t *wire)
 
 
 // Each field is copied through a variable of its own width, so the native
-// byte order never matters, and nothing assumes the struct is aligned.
+// byte order never matters, and nothing assumes the struct is aligned. Any
+// size but 2 and 4 is bytes, copied as they are.
 uint16_t sml_encode(const uint8_t *layout, const void *native, uint8_t *wire)
 {
     const uint8_t *source = (const uint8_t *)native;
@@ -192,7 +215,7 @@ uint16_t sml_encode(const uint8_t *layout, const void *native, uint8_t *wire)
         }
         else
         {
-            wire[offset] = source[offset];
+            memcpy(wire + offset, source + offset, *layout);
         }
         offset = (uint16_t)(offset + *layout);
     }
@@ -219,7 +242,7 @@ uint16_t sml_decode(const uint8_t *layout, const uint8_t *wire, void *native)
         }
         else
         {
-            destination[offset] = wire[offset];
+            memcpy(destination + offset, wire + offset, *layout);
         }
         offset = (uint16_t)(offset + *layout);
     }

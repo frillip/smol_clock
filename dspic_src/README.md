@@ -45,13 +45,18 @@ Most of the firmware has host tests, built with gcc against stand-ins for the ha
 - the ESP link and payloads, the time zone schedule, the calendar (every day from 1970 to 2106) and the report formatter;
 - the I2C master, the PCF8563 driver and the RTC source: its second searched for, its rate, the anchor and bound, and setting it;
 - the settings and the flash journal, through simulated power cuts;
-- the light sensor and brightness, the button and switch, the menu (and setting the time from it), the alarm, beeps and buzzer.
+- the light sensor and brightness, the button and switch, the menu (and setting the time from it), the alarm, beeps and buzzer;
+- the bootloader's shared layout and checksums ([common/boot_layout.h](../common/boot_layout.h), [common/boot_crc.c](../common/boot_crc.c)) against its specification.
 
 ```
 cd tests/host && make
 ```
 
+The image tool has Python tests of its own: `python3 -m unittest discover -s tests/tools -t tests/tools`.
+
 [tools/format.sh](tools/format.sh) applies the house style: clang-format with [.clang-format](.clang-format), then [tools/style.py](tools/style.py). Firmware sources use CRLF line endings, the host tests LF.
+
+[tools/make_image.py](tools/make_image.py) turns production `.hex` files into the bootloader's files: the application image and the SPL image the ESP sends, and the first-installation hex for a PICkit. `info` checks a file. The bootloader itself is still to come, so for now only a build linked for it (from 0x002000) makes an application image.
 
 # Layout
 

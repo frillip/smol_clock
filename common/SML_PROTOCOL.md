@@ -6,7 +6,7 @@ SML is the link between the dsPIC33EP256GP504 timekeeper (the **PIC**) and the E
 
 The PIC keeps UTC and disciplines the clock's epoch. The ESP supplies what the PIC cannot get on its own: network time, timezone schedules, leap-second data and user commands. In return the ESP receives the PIC's state for display, logging and statistics, and tells the PIC about its network and services.
 
-This document describes protocol version 2.4 (`SML_PROTOCOL_MAJOR` 2, `SML_PROTOCOL_MINOR` 4) with settings schema 1 (`SML_SETTINGS_SCHEMA`). The definitions live in [sml_proto.h](sml_proto.h), and the reference codec in [sml.c](sml.c) and [sml.h](sml.h), all in `common/` and shared by both firmwares. TIME-AUTH is stable. Every other payload remains provisional until both ends implement it.
+This document describes protocol version 2.5 (`SML_PROTOCOL_MAJOR` 2, `SML_PROTOCOL_MINOR` 5) with settings schema 1 (`SML_SETTINGS_SCHEMA`). The definitions live in [sml_proto.h](sml_proto.h), and the reference codec in [sml.c](sml.c) and [sml.h](sml.h), all in `common/` and shared by both firmwares. TIME-AUTH is stable. Every other payload remains provisional until both ends implement it.
 
 # Physical link
 
@@ -69,6 +69,8 @@ All `*_age_ms` fields are `uint16_t` and saturate at 65535ms rather than wrappin
 
 Each validity flag covers its group of fields. Fields whose flag is clear carry no information, and are normally zero.
 
+Byte strings (the BOOT chunks) go as they are, in order.
+
 Every message except STAT-DEBUG has a fixed length. State messages are at least 8 bytes (`SML_MIN_STATE_BYTES`). Commands, responses and debug text may be shorter.
 
 ## Receiving
@@ -100,7 +102,7 @@ The PIC switches to SML mode, permanently until it resets, on the **first valid 
 
 Traffic from old 0x83 firmware is harmless noise to an SML receiver. The chance of one of those messages passing for an SML frame is about 2⁻¹⁶ per false sync, and it would also need the right class, ID and length to be acted on.
 
-Class 0xF0 is reserved for a future bootloader. Its IDs are reserved but its payloads are not defined. The bootloader will be specified separately once the V2+ work is complete.
+Class 0xF0 belongs to the bootloader (see [BOOT class](#boot-class-0xf0)). The PIC's second-stage loader (the SPL) speaks only that class, in either link mode: it ignores everything else and sends no text.
 
 # Conventions
 
@@ -134,7 +136,13 @@ The "V2+ PIC" column in the message catalogue and the command table records what
 | 0x80 CMD | 0x10 | CMD-USER | Both ways | 10 | ✓ Runs PIC codes, sends ESP codes | On demand |
 | | 0x20 | CMD-RESPONSE | Both ways | 12 | ✓ | One per command |
 | | 0x30 | CMD-SETTINGS | ESP→PIC | 38 | ✓ Handled | On demand |
-| 0xF0 BOOT | 0x10, 0x20, 0x50, 0x60, 0x90, 0xA0 | Reserved for the bootloader | — | Not defined | — | — |
+| 0xF0 BOOT | 0x01 | BOOT-STATUS | PIC→ESP | 56 | — Not yet (0.4.0) | SPL: on entry and every second while idle. Both: before the ACK to STATUS |
+| | 0x10 | BOOT-COMMAND | ESP→PIC | 32 | — Not yet | On demand, one at a time |
+| | 0x20 | BOOT-RESPONSE | PIC→ESP | 12 | — Not yet | One per command, two when ACCEPTED |
+| | 0x50 | BOOT-DATA | ESP→PIC | 204 | — Not yet | One chunk at a time |
+| | 0x60 | BOOT-DATA-RESPONSE | PIC→ESP | 12 | — Not yet | One per chunk |
+| | 0x90 | BOOT-VERIFY | ESP→PIC | 8 | — Not yet | One chunk at a time |
+| | 0xA0 | BOOT-VERIFY-RESPONSE | PIC→ESP | 204 | — Not yet | One per request |
 
 # TIME class (0x10)
 
@@ -669,7 +677,7 @@ Commands run by the PIC:
 | 0x0021 | `SET_DEBUG` | clear << 16 \| set, `SML_DEBUG_*` bits | ✓ See below. Setting a bit outside `SML_DEBUG_ALL` is NACK `ARGUMENT`; clearing any is fine (0xFFFF clears all) |
 | 0x0030 | `RESYNC` | — | ✓ (2.4) Every source judged again and the choice made again, at the next epoch: each source's record starts afresh, holdover is dropped, and the clock free runs on its learnt frequency, counting the time of day on, until a source qualifies again (3 epochs). The best by bound is then taken up as at start-up, slewed onto if the loop was tracking and its edge is close, else stepped. TIME-PIC `last_sync_cause` RESYNC. ACK at once |
 | 0x0031 | `RESET` | — | ✓ ACK, flush, then software reset |
-| 0x0032 | `ENTER_BOOTLOADER` | — | Reserved for the bootloader. NACK UNSUPPORTED |
+| 0x0032 | `ENTER_BOOTLOADER` | — | ACK, then a reset into the SPL, which starts `HELD` ([Entering the SPL](#entering-the-spl)). Not yet implemented: NACK UNSUPPORTED until 0.4.0 |
 
 `SHOW` topics:
 
@@ -735,13 +743,115 @@ When the flash is written is up to the PIC, and periodic snapshots never drive i
 
 The ESP keeps the latest STAT-SETTINGS, and changes one setting by writing that body back with the one field changed. A change made while its previous write is unanswered is folded into the same body and sent once that answer arrives, with the new revision it carries, so a burst of changes never meets `STALE_REVISION`. After a NACK, or no answer, the ESP asks for STAT-SETTINGS again (`REQUEST_MESSAGE`) and drops any change still waiting.
 
+# BOOT class (0xF0)
+
+The bootloader's messages. The PIC boots in two stages: a frozen initial loader in page 0 (the IPL), then a second-stage loader (the **SPL**, pages 1–3) or, when the SPL is unusable, the application directly. The SPL writes the application. The application writes the SPL. Neither writes both, so an interrupted update of either leaves the other to repeat it. The flash layout, the records and the RAM mailbox are in [boot_layout.h](boot_layout.h), and the checksums in [boot_crc.c](boot_crc.c).
+
+## Conventions
+
+- **Who answers.** The SPL answers BOOT messages for the regions `APP` and `TEST`, and ignores every other class. The application answers them for the region `SPL`, alongside everything else. Each refuses the other's region (NACK `ARGUMENT`).
+- **One request at a time.** The ESP sends nothing more until the answer arrives or its timeout passes. The PIC cannot receive while flash is erased or written (the CPU stalls), and its receive FIFO holds 4 bytes. The application writes flash only in its quiet window, so it may answer up to about a second later.
+- **Fixed lengths.** A BOOT frame of the wrong length is dropped, unanswered.
+- **Regions** (`SML_BOOT_REGION_*`):
+
+| Region | Value | Flash | Record | Written by |
+| --- | --- | --- | --- | --- |
+| `APP` | 0 | 0x002000–0x028FFF | 0x029000 | The SPL |
+| `SPL` | 1 | 0x000800–0x001F7F | 0x001F80 | The application |
+| `TEST` | 2 | 0x028800–0x028F7F | 0x028F80 | The SPL, while the application does not reach it |
+
+- **Chunk**: 64 instructions, 0x80 program address units, 192 bytes **packed**: each 24-bit instruction as 3 bytes, least significant first (the Intel HEX order without the phantom byte). A chunk address is a multiple of 0x80 within the region. Record rows are never sent: the writer builds the record from `COMMIT`.
+- **CRC-32**: IEEE 802.3 (zlib's `crc32`), over packed bytes, for each image and each chunk. The frame's CRC-16 stays as well.
+
+## BOOT-STATUS (0x01)
+
+_PIC→ESP, 56 bytes._ The SPL sends it on entry, every second while idle, and before the ACK to `STATUS`. The application sends it only before the ACK to `STATUS`, with `mode` `APP`.
+
+| Offset | Field | Type | Meaning |
+| --- | --- | --- | --- |
+| 0 | `spl_version` | u32 | From the SPL record (major << 16 \| minor << 8 \| patch), 0 without one |
+| 4 | `protocol` | u8 | `SML_BOOT_PROTOCOL`, 1 |
+| 5 | `mode` | u8 | `WINDOW` 0, `HELD` 1, `NO_APP` 2, `LOOP` 3, `APP` 4 |
+| 6 | `flags` | u16 | `RECORD` 0x0001, `COMMITTED` 0x0002, `CHECKING` 0x0004, `IMAGE_OK` 0x0008, `ERASED` 0x0010, `REQUESTED` 0x0020, `POWER_ON` 0x0040, `TEST_FREE` 0x0080 |
+| 8 | `reset_cause` | u16 | RCON as found (`SML_RESET_*`) |
+| 10 | `window_ms` | u16 | Left of the boot window (`WINDOW`), else 0 |
+| 12 | `device_id` | u32 | DEVID |
+| 16 | `region_start` | u32 | 0x002000 |
+| 20 | `region_end` | u32 | 0x029000, exclusive |
+| 24 | `app_version` | u32 | From the application record (`RECORD`), else 0 |
+| 28 | `app_length` | u32 | Instructions |
+| 32 | `app_crc32` | u32 | From the record |
+| 36 | `crc32_computed` | u32 | Over `app_length` instructions, unless `CHECKING`. In `APP`, the record's |
+| 40 | `build_time` | u32 | From the record |
+| 44 | `attempts` | u8 | Hand-overs since the application last reported healthy |
+| 45 | `boot` | u8 | How this start came about: `APP_DIRECT` 0x01, `UNCONFIRMED` 0x02, `NO_SPL` 0x04, `SPL_GIVEN_UP` 0x08, `LAST_RESORT` 0x10 |
+| 46 | `ipl_version` | u16 | major << 8 \| minor |
+| 48 | `spl_state` | u8 | `RECORD` 0x01, `COMMITTED` 0x02, `INTACT` 0x04, `CONFIRMED` 0x08, `REJECTED` 0x10 |
+| 49 | `trials` | u8 | Starts of the SPL while unconfirmed |
+| 50 | `healthy_s` | u16 | The application: seconds healthy since its start, saturating. The SPL: 0 |
+| 52 | `spl_crc32` | u32 | From the SPL record |
+
+## BOOT-COMMAND (0x10) and BOOT-RESPONSE (0x20)
+
+**BOOT-COMMAND**, _ESP→PIC, 32 bytes:_
+
+| Offset | Field | Type | Meaning |
+| --- | --- | --- | --- |
+| 0 | `token` | u16 | The ESP's, echoed |
+| 2 | `command` | u8 | Below |
+| 3 | `region` | u8 | `SML_BOOT_REGION_*`, 0 for a command without one |
+| 4 | `key` | u32 | `0x45524153` ("ERAS") for `ERASE`, `0x434F4D4D` ("COMM") for `COMMIT` and `CONFIRM`, else 0 |
+| 8 | `version` | u32 | `COMMIT`: the image's version. Else 0, as are the rest |
+| 12 | `start` | u32 | `COMMIT`: 0x002000 (`APP`), 0x028800 (`TEST`), 0x000800 (`SPL`) |
+| 16 | `length` | u32 | `COMMIT`: instructions, even |
+| 20 | `crc32` | u32 | `COMMIT`: of the packed image |
+| 24 | `build_time` | u32 | `COMMIT`: Unix seconds |
+| 28 | `extra` | u16 | `COMMIT`: `APP` and `TEST`, the application's SML version (major << 8 \| minor). `SPL`, its bootloader protocol |
+| 30 | reserved | u16 | 0 |
+
+**BOOT-RESPONSE**, _PIC→ESP, 12 bytes:_ `status` u16 (`SML_RESULT_*`), `detail` u16 (`SML_ERROR_*`), `token` u16, `command` u8, `region` u8, `value` u32.
+
+| Code | Command | Answered by | Answer |
+| --- | --- | --- | --- |
+| 0x01 | `STATUS` | SPL, application | BOOT-STATUS, then ACK |
+| 0x02 | `HOLD` | SPL | ACK. No boot window, no hand-over until `RUN` |
+| 0x03 | `ERASE` | SPL (`APP`, `TEST`), application (`SPL`) | ACCEPTED, then ACK with `value` the pages erased, or NACK `STORAGE`. The record's page first, then the rest, then a blank check |
+| 0x04 | `COMMIT` | SPL (`APP`, `TEST`), application (`SPL`) | ACCEPTED, then ACK. `ARGUMENT` for a start or length outside the region, `STATE` without an `ERASE` in this session, `VERIFY` (with `value` the CRC-32 computed) when the flash does not match `crc32`. Then the record, then its `commit` words alone |
+| 0x05 | `RUN` | SPL | ACK, then the application if its image is valid, else NACK `STATE` |
+| 0x06 | `RESET` | SPL | ACK, then a software reset |
+| 0x07 | `CONFIRM` | Application (`SPL`) | ACK once the SPL record's `confirm` words are written, NACK `STATE` unless started by an unconfirmed SPL |
+
+`ERASE` and `COMMIT` without the right key are NACK `ARGUMENT`. Commands an answerer does not take are NACK `UNSUPPORTED`, and anything arriving while ACCEPTED work is under way NACK `BUSY`. The application also refuses an SPL update for its first 60 healthy seconds, and the SPL refuses to erase a valid application while it is itself unconfirmed (both NACK `STATE`).
+
+## BOOT-DATA (0x50) and BOOT-DATA-RESPONSE (0x60)
+
+**BOOT-DATA**, _ESP→PIC, 204 bytes:_ `address` u32, `region` u8, reserved u8[3], `crc32` u32 (of `data`), `data` u8[192] (one chunk, packed).
+
+The writer checks the region and address (`ARGUMENT`), that this session erased (`STATE`) and the chunk's CRC-32 (`CRC`, send it again). Flash identical to `data` is a retransmission whose ACK was lost, and is ACKed again. Anything else must be erased (`NOT_BLANK`, start again from `ERASE`). It writes each double word that is not erased already (`STORAGE` on a write error), reads the chunk back (`VERIFY`), and answers.
+
+**BOOT-DATA-RESPONSE**, _PIC→ESP, 12 bytes:_ `status` u16, `detail` u16, `address` u32, `crc32` u32 of the chunk as now in flash (on ACK).
+
+Chunks may come in any order, and all-0xFFFFFF chunks may be skipped: the image's CRC-32 still covers them.
+
+## BOOT-VERIFY (0x90) and BOOT-VERIFY-RESPONSE (0xA0)
+
+**BOOT-VERIFY**, _ESP→PIC, 8 bytes:_ `address` u32, reserved u32.
+
+**BOOT-VERIFY-RESPONSE**, _PIC→ESP, 204 bytes:_ `status` u16 (ACK, or NACK `ARGUMENT`), `detail` u16, `address` u32, `crc32` u32 of `data`, `data` u8[192]: the chunk read from flash.
+
+Any chunk below 0x029800, at any time, from the SPL and the application alike. It only reads. The ESP compares `data` with its image, and a mismatch abandons the update and starts again from `ERASE`.
+
+## Entering the SPL
+
+CMD-USER `ENTER_BOOTLOADER` (0x0032), to the running application: ACK, then a reset with a request left in RAM, and the SPL starts `HELD` with `REQUESTED` set. After any other reset the SPL waits 1 s (`WINDOW`) for `HOLD` before it starts a valid application. While the PIC is in the SPL, the ESP sends it nothing but BOOT messages, and goes back to normal on the first STAT-SYS.
+
 # Implementation notes
 
 ## Codec
 
 The codec in [sml.c](sml.c) and [sml.h](sml.h) is portable C99 with no hardware dependency, and both firmwares build the same file.
 
-Each message has an entry in a table with its class, ID, fixed length (0 for STAT-DEBUG), direction and **layout**. The layout is the list of field sizes in wire order; TIME-AUTH, for example, is `{2, 1, 1, 4, 4, 4}`. The structs are packed, so a field's offset in the struct equals its offset on the wire, and one layout describes both.
+Each message has an entry in a table with its class, ID, fixed length (0 for STAT-DEBUG), direction and **layout**. The layout is the list of field sizes in wire order. TIME-AUTH, for example, is `{2, 1, 1, 4, 4, 4}`. Sizes 2 and 4 are big-endian integers, and any other size is that many bytes, copied as they are: BOOT-DATA's chunk is one field of 192. The structs are packed, so a field's offset in the struct equals its offset on the wire, and one layout describes both.
 
 `sml_encode` and `sml_decode` convert between a packed native struct and the wire one field at a time, through a variable of that field's width, so native byte order and alignment never matter. `sml_frame` builds a complete frame around a payload, and `sml_frame_message` encodes straight from the native struct. `sml_parser_push`, `sml_parser_next` and `sml_parser_timeout` together implement the receiving rules. The parser buffers at most one frame (248 bytes), so it cannot overflow.
 
@@ -1025,6 +1135,8 @@ So 0x16 is tIME on the top level, and 0xA1 the time zone's offset being edited.
 | | | | `SML_ERROR_STORAGE` | 7 |
 | | | | `SML_ERROR_VERIFY` | 8 |
 | | | | `SML_ERROR_STATE` | 9 |
+| | | | `SML_ERROR_CRC` | 10 |
+| | | | `SML_ERROR_NOT_BLANK` | 11 |
 
 # Golden frames
 
@@ -1040,6 +1152,14 @@ B5 73 10 01 00 10 00 07 05 02 6A D4 BC F0 FF FF FF 6A 00 00 00 4B 0F F3
 
 ```
 B5 73 80 10 00 0A 00 20 00 00 12 34 6A D4 BC F0 F9 54
+```
+
+**BOOT-COMMAND**: `ERASE` the application region, token 0x1234.
+
+```
+B5 73 F0 10 00 20 12 34 03 00 45 52 41 53 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 8D 92
 ```
 
 **STAT-DEBUG**: the text `"Hi\r\n"`.
@@ -1066,7 +1186,7 @@ B5 73 20 01 00 7C 00 01 03 08 6A CE 65 F5 72 66
 
 NTP is a sync source on the PIC, with its loop profile, jitter allowance and holdover model set from bench data. STAT-SOURCES, `SET_DEBUG` and TIME-PIC `second_source` are implemented at both ends. While TIME-NTP has `CORRECTING` set, the PIC holds its frequency estimate (the servo integral) and works the phase off with its proportional term alone; routine gentle corrections are simply followed.
 
-The bootloader class (0xF0) is reserved but not defined, and will be specified separately after the V2+ work.
+The BOOT class is defined, and nothing implements it yet. The SPL, the application's half (region SPL, `CONFIRM`) and the ESP's procedures come with firmware 0.4.0.
 
 The sub-second timezone offset is rounded to the second. Applying it as a display phase shift, by delaying the latch for that zone, is possible but not planned. Mecca time enthusiasts will have to make do with the nearest second.
 
@@ -1080,6 +1200,7 @@ The timezone architecture document should follow the model described under [TZ-S
 
 | Date | Change |
 | --- | --- |
+| 2026-11-02 (2.5) | BOOT class (0xF0) defined: BOOT-STATUS (0x01, new), BOOT-COMMAND, BOOT-RESPONSE, BOOT-DATA, BOOT-DATA-RESPONSE, BOOT-VERIFY, BOOT-VERIFY-RESPONSE, with their regions, commands, keys, modes and flags. `SML_ERROR_CRC` (10) and `SML_ERROR_NOT_BLANK` (11). A layout field of any size but 2 or 4 is a byte string. Not implemented yet. No existing layout changes |
 | 2026-10-30 (2.4) | `RESYNC` defined and implemented on the V2+ PIC: every source judged again and chosen again, holdover dropped. `SML_CAUSE_RESYNC` (9). No layout change |
 | 2026-10-29 | Document only, no wire change. The V2+ PIC sends TIME-RTC every epoch after TIME-GNSS, with its fields defined for the PCF8563; the RTC's bound grows from its last measurement against the synchronised clock, kept over a reset, so the TIME-AUTH uncertainty while free running on the RTC and the STAT-SOURCES bound for it are no longer a fixed ±999ms |
 | 2026-10-28 (2.3) | `SML_MENU_*` values for STAT-UI `menu_state`: the V2+ menu's section, item and `EDITING`. The V2+ PIC reports `current_display` `MENU` while the menu is open. No layout change |

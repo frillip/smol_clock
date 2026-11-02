@@ -39,7 +39,7 @@ typedef struct
     uint8_t message_id;
     uint8_t length;        // payload bytes; 0: variable (STAT-DEBUG)
     uint8_t direction;     // SML_FROM_*
-    const uint8_t *layout; // field sizes (1, 2 or 4) in order, 0-terminated
+    const uint8_t *layout; // field sizes in order, 0-terminated: 2 and 4 integers, else bytes
     const char *name;      // "TIME-AUTH", ...
 } SmlMessage;
 
