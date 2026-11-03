@@ -111,8 +111,16 @@ static bool app_valid(void)
 
 void ipl_mailbox_prepare(BootMailbox *mailbox, uint16_t rcon)
 {
-    if ((rcon & BOOT_RESET_POWER) != 0U || mailbox->magic != MAILBOX_MAGIC_VALUE ||
-        mailbox->magic_inverse != (uint16_t)~MAILBOX_MAGIC_VALUE)
+    bool kept = (rcon & BOOT_RESET_POWER) == 0U && mailbox->magic == MAILBOX_MAGIC_VALUE &&
+                mailbox->magic_inverse == (uint16_t)~MAILBOX_MAGIC_VALUE;
+
+    // The watchdog, while the application was not running: the SPL hung
+    // (the IPL itself never runs under it).
+    mailbox->boot = kept && (rcon & BOOT_RESET_WDTO) != 0U &&
+                            mailbox->running != MAILBOX_RUNNING_VALUE
+                        ? BOOT_PATH_SPL_HUNG
+                        : 0U;
+    if (!kept)
     {
         mailbox->magic = MAILBOX_MAGIC_VALUE;
         mailbox->magic_inverse = (uint16_t)~MAILBOX_MAGIC_VALUE;
@@ -121,24 +129,28 @@ void ipl_mailbox_prepare(BootMailbox *mailbox, uint16_t rcon)
         mailbox->trials = 0;
     }
     mailbox->running = 0;
-    mailbox->boot = 0;
     mailbox->reset_cause = (uint16_t)(rcon & BOOT_RESET_CAUSES);
 }
 
 
-// An SPL start: an unconfirmed one uses a trial and runs under the watchdog.
+static void count_trial(BootMailbox *mailbox)
+{
+    if (mailbox->trials != 0xFFFFU)
+    {
+        mailbox->trials++;
+    }
+}
+
+
+// An SPL start, always under the watchdog: an unconfirmed one uses a trial.
 static IplChoice start_spl(BootMailbox *mailbox, const Image *spl)
 {
-    IplChoice choice = {IPL_START_SPL, false};
+    IplChoice choice = {IPL_START_SPL, true};
 
     if (!spl->confirmed)
     {
         mailbox->boot |= BOOT_PATH_UNCONFIRMED;
-        if (mailbox->trials != 0xFFFFU)
-        {
-            mailbox->trials++;
-        }
-        choice.watchdog = true;
+        count_trial(mailbox);
     }
     return choice;
 }
@@ -149,9 +161,22 @@ IplChoice ipl_select(BootMailbox *mailbox)
     IplChoice none = {IPL_START_NONE, false};
     Image spl = spl_state();
 
+    // A confirmed SPL's trials count its hangs in a row instead: zeroed by
+    // any other reset, so a hang that recurs gives way to the application,
+    // and the SPL is tried again at its next reset.
+    if (spl.committed && spl.confirmed)
+    {
+        if ((mailbox->boot & BOOT_PATH_SPL_HUNG) != 0U)
+        {
+            count_trial(mailbox);
+        }
+        else
+        {
+            mailbox->trials = 0;
+        }
+    }
     // 1: the SPL, in the normal way.
-    if (spl.committed && !spl.rejected && (spl.confirmed || mailbox->trials < SPL_TRIAL_LIMIT) &&
-        spl_intact(&spl))
+    if (spl.committed && !spl.rejected && mailbox->trials < SPL_TRIAL_LIMIT && spl_intact(&spl))
     {
         return start_spl(mailbox, &spl);
     }
@@ -160,7 +185,7 @@ IplChoice ipl_select(BootMailbox *mailbox)
     {
         IplChoice choice = {IPL_START_APP, false};
 
-        mailbox->boot =
+        mailbox->boot |=
             BOOT_PATH_APP_DIRECT | (spl_intact(&spl) ? BOOT_PATH_SPL_GIVEN_UP : BOOT_PATH_NO_SPL);
         mailbox->running = MAILBOX_RUNNING_VALUE;
         return choice;
@@ -168,7 +193,7 @@ IplChoice ipl_select(BootMailbox *mailbox)
     // 3: the SPL, whatever its trials and reject say: nothing else is left.
     if (spl_intact(&spl))
     {
-        mailbox->boot = BOOT_PATH_LAST_RESORT;
+        mailbox->boot |= BOOT_PATH_LAST_RESORT;
         return start_spl(mailbox, &spl);
     }
     return none;

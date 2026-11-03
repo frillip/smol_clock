@@ -50,6 +50,37 @@ static uint32_t stranded_ms;    // when the PIC was first seen without an applic
 static bool stranded;
 static uint8_t recoveries;
 
+// The SPL's state, asked of the application (probe): a while after the PIC
+// is first heard and after each restart of it, then hourly. A missing,
+// rejected or unconfirmed SPL is installed again from picfw (repair).
+#define PROBE_TOKEN     0x6800U
+#define PROBE_AFTER_MS  5000U
+#define PROBE_EVERY_MS  3600000UL
+#define PROBE_ANSWER_MS 2000U
+#define REPAIR_LIMIT    3U
+
+typedef enum
+{
+    SPL_HEALTH_UNKNOWN,
+    SPL_HEALTH_OK,          // committed, intact, confirmed
+    SPL_HEALTH_MISSING,     // none, not intact, or rejected
+    SPL_HEALTH_UNCONFIRMED, // intact, never confirmed (a confirmation cut short)
+} SplHealth;
+
+static SplHealth spl_health;
+static SML_BOOT_STATUS_PAYLOAD probed;
+static uint32_t probed_ms;
+static bool probe_out;
+static bool probed_since_restart;
+static uint32_t probe_sent_ms;
+static uint32_t seen_restarts = 0xFFFFFFFFUL;
+static uint32_t restart_seen_ms;
+static bool repair_due;
+static uint8_t repairs;
+static bool rejected_known; // an SPL rejected since the ESP started: not installed again
+static uint32_t rejected_version;
+static uint32_t rejected_crc32;
+
 static void send(void *context, uint8_t class_id, uint8_t message_id, const uint8_t *payload,
                  uint16_t length)
 {
@@ -143,8 +174,34 @@ static bool keep_end(void *context)
 static const SplUpdatePort spl_port = {send,       spl_read, spl_stored, keep_begin,
                                        keep_write, keep_end, NULL};
 
+static SplHealth spl_health_of(const SML_BOOT_STATUS_PAYLOAD *s)
+{
+    const uint8_t intact = SML_SPL_STATE_COMMITTED | SML_SPL_STATE_INTACT;
+
+    if ((s->spl_state & (intact | SML_SPL_STATE_REJECTED)) != intact)
+    {
+        return SPL_HEALTH_MISSING;
+    }
+    return (s->spl_state & SML_SPL_STATE_CONFIRMED) != 0U ? SPL_HEALTH_OK : SPL_HEALTH_UNCONFIRMED;
+}
+
+
 static void on_frame(const SmlFrame *frame)
 {
+    // The answer to the probe: BOOT-STATUS, then the ACK.
+    if (probe_out && frame->class_id == SML_CLASS_BOOT && frame->message_id == SML_BOOT_RESPONSE &&
+        frame->length == SML_BOOT_RESPONSE_BYTES && sml_get_u16(&frame->payload[4]) == PROBE_TOKEN)
+    {
+        probe_out = false;
+        if (sml_get_u16(&frame->payload[0]) == SML_RESULT_ACK &&
+            pic_link_get(SML_CLASS_BOOT, SML_BOOT_STATUS, &probed, PROBE_ANSWER_MS) &&
+            probed.mode == SML_BOOT_MODE_APP)
+        {
+            probed_ms = millis();
+            spl_health = spl_health_of(&probed);
+            repair_due = spl_health == SPL_HEALTH_MISSING || spl_health == SPL_HEALTH_UNCONFIRMED;
+        }
+    }
     if (started && pic_update_running(&update))
     {
         pic_update_frame(&update, frame->class_id, frame->message_id, frame->payload,
@@ -426,7 +483,8 @@ static void spl_report(void)
         case SPL_UPDATE_TEST_ERASE: console_printf("SPL update: testing the new SPL\n"); break;
         case SPL_UPDATE_RUN: console_printf("SPL update: back to the application\n"); break;
         case SPL_UPDATE_WAIT_CONFIRM:
-            console_printf("SPL update: confirming once the application has run 60 s\n");
+            console_printf("SPL update: confirming once the application has run %u s\n",
+                           (unsigned)spl.confirm_s);
             break;
         case SPL_UPDATE_DONE:
             spl_finished_ms = millis();
@@ -448,6 +506,9 @@ static void spl_report(void)
             break;
         case SPL_UPDATE_REJECTED:
             spl_finished_ms = millis();
+            rejected_known = true;
+            rejected_version = spl_staged.header.version;
+            rejected_crc32 = spl_staged.header.crc32;
             console_printf("SPL update: REJECTED: %s\n", spl.reason);
             spl_put_back();
             break;
@@ -524,6 +585,142 @@ static void recover(void)
 }
 
 
+// Asks the application for BOOT-STATUS when due: PROBE_AFTER_MS after the
+// PIC is first heard or restarts, then every PROBE_EVERY_MS.
+static void probe_service(void)
+{
+    uint32_t now = millis();
+    uint32_t restarts = pic_link_stats()->restarts;
+    uint8_t p[SML_BOOT_COMMAND_BYTES];
+
+    if (pic_link_in_spl() || pic_boot_updating() ||
+        !pic_link_get(SML_CLASS_STAT, SML_STAT_SYS, NULL, BOOT_STATUS_AGE_MS))
+    {
+        probe_out = false;
+        return;
+    }
+    if (restarts != seen_restarts)
+    {
+        seen_restarts = restarts;
+        restart_seen_ms = now;
+        probed_since_restart = false;
+    }
+    if (probe_out)
+    {
+        probe_out = now - probe_sent_ms < PROBE_ANSWER_MS; // unanswered: next hour
+        return;
+    }
+    if (probed_since_restart ? now - probe_sent_ms < PROBE_EVERY_MS
+                             : now - restart_seen_ms < PROBE_AFTER_MS)
+    {
+        return;
+    }
+    memset(p, 0, sizeof(p));
+    sml_put_u16(&p[0], PROBE_TOKEN);
+    p[2] = SML_BOOT_CMD_STATUS;
+    probe_out = true;
+    probed_since_restart = true;
+    probe_sent_ms = now;
+    pic_link_send_wire(SML_CLASS_BOOT, SML_BOOT_COMMAND, p, sizeof(p));
+}
+
+
+static const char *spl_health_name(SplHealth health)
+{
+    static const char *const names[] = {"not known", "confirmed", "MISSING", "UNCONFIRMED"};
+
+    return names[health];
+}
+
+
+// The SPL to install for a repair: for an unconfirmed one, its own file;
+// else the newest staged that has not been rejected since the ESP started.
+static bool spl_repair_file(PicStoredFile *file)
+{
+    PicStoredFile candidate;
+    uint8_t slot;
+    bool found = false;
+
+    for (slot = 0; slot < PIC_STORE_SLOTS; slot++)
+    {
+        if (spl_health == SPL_HEALTH_UNCONFIRMED && pic_store_get(PIC_FILE_SPL, slot, &candidate) &&
+            candidate.header.version == probed.spl_version &&
+            candidate.header.crc32 == probed.spl_crc32)
+        {
+            *file = candidate;
+            return true;
+        }
+    }
+    for (slot = 0; slot < PIC_STORE_SLOTS; slot++)
+    {
+        if (!pic_store_get(PIC_FILE_SPL, slot, &candidate) ||
+            (rejected_known && candidate.header.version == rejected_version &&
+             candidate.header.crc32 == rejected_crc32))
+        {
+            continue;
+        }
+        if (!found || candidate.header.version > file->header.version)
+        {
+            *file = candidate;
+            found = true;
+        }
+    }
+    return found;
+}
+
+
+bool pic_boot_spl_needs_repair(void)
+{
+    return spl_health == SPL_HEALTH_MISSING || spl_health == SPL_HEALTH_UNCONFIRMED;
+}
+
+
+bool pic_boot_repair_spl(Stream *output)
+{
+    PicStoredFile file;
+    char text[16];
+
+    if (!pic_boot_spl_needs_repair())
+    {
+        return false;
+    }
+    if (repairs >= REPAIR_LIMIT)
+    {
+        output->printf("SPL: %s, but %u repairs have been tried since the ESP started\n",
+                       spl_health_name(spl_health), REPAIR_LIMIT);
+        return false;
+    }
+    if (!spl_repair_file(&file))
+    {
+        output->printf("SPL: %s, and no SPL staged to install (\"update spl\")\n",
+                       spl_health_name(spl_health));
+        return false;
+    }
+    pic_report_version(text, sizeof(text), file.header.version);
+    output->printf("SPL: %s: installing the staged %s again (%u of %u)\n",
+                   spl_health_name(spl_health), text, (unsigned)repairs + 1U, REPAIR_LIMIT);
+    if (!pic_boot_update_spl(&file, true, output))
+    {
+        return false;
+    }
+    repairs++;
+    spl_health = SPL_HEALTH_UNKNOWN; // asked again after the update's restarts
+    return true;
+}
+
+
+// A probe's answer that needs it: the repair, by itself.
+static void repair_service(void)
+{
+    if (!repair_due || pic_boot_updating() || pic_link_in_spl())
+    {
+        return;
+    }
+    repair_due = false;
+    (void)pic_boot_repair_spl(console_stream());
+}
+
+
 void pic_boot_service(void)
 {
     if (pic_link_in_spl() && !pic_boot_updating() &&
@@ -549,6 +746,8 @@ void pic_boot_service(void)
         spl_report();
     }
     recover();
+    probe_service();
+    repair_service();
 }
 
 
@@ -580,8 +779,8 @@ static void print_status(Stream *output, const SML_BOOT_STATUS_PAYLOAD *s)
     static const char *const flags[] = {"RECORD",    "COMMITTED", "CHECKING", "IMAGE_OK",
                                         "ERASED",    "REQUESTED", "POWER_ON", "TEST_FREE"};
     static const char *const spl[] = {"RECORD", "COMMITTED", "INTACT", "CONFIRMED", "REJECTED"};
-    static const char *const paths[] = {"APP_DIRECT", "UNCONFIRMED", "NO_SPL", "SPL_GIVEN_UP",
-                                        "LAST_RESORT"};
+    static const char *const paths[] = {"APP_DIRECT",   "UNCONFIRMED", "NO_SPL",
+                                        "SPL_GIVEN_UP", "LAST_RESORT", "SPL_HUNG"};
     char text[96];
 
     output->printf("PIC: in its SPL, %s, %s\n", pic_report_boot_mode_name(s->mode),
@@ -598,7 +797,7 @@ static void print_status(Stream *output, const SML_BOOT_STATUS_PAYLOAD *s)
                    s->ipl_version & 0xFFU, s->protocol, (unsigned long)s->device_id);
     output->printf("  last reset: %s; boot %s; attempts %u, trials %u\n",
                    pic_report_reset_name(s->reset_cause),
-                   bits(text, sizeof(text), s->boot, paths, 5), s->attempts, s->trials);
+                   bits(text, sizeof(text), s->boot, paths, 6), s->attempts, s->trials);
 }
 
 
@@ -650,6 +849,12 @@ void pic_boot_print(Stream *output, bool verbose)
         output->printf("PIC: not heard from\n");
     }
     (void)verbose;
+    if (spl_health != SPL_HEALTH_UNKNOWN)
+    {
+        output->printf("SPL: %s (", spl_health_name(spl_health));
+        print_version(output, probed.spl_version);
+        output->printf(", asked %lu s ago)\n", (unsigned long)((millis() - probed_ms) / 1000UL));
+    }
     if (spl_started)
     {
         output->printf("SPL update: ");

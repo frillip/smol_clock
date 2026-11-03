@@ -429,9 +429,12 @@ static void note_system(const SML_STAT_SYS_PAYLOAD *sys)
         {
             stats.restarts++;
         }
-        console_printf("%s: firmware %s, up %lu s, last reset: %s\n",
+        console_printf("%s: firmware %s, up %lu s, last reset: %s%s\n",
                        seen ? "PIC restarted" : "PIC", version, (unsigned long)sys->uptime_s,
-                       pic_report_last_reset(sys, reset, sizeof(reset)));
+                       pic_report_last_reset(sys, reset, sizeof(reset)),
+                       (sys->flags & SML_SYS_CLOCK_FALLBACK) != 0U
+                           ? "; CLOCK FALLBACK: the external clock did not start"
+                           : "");
     }
     seen = true;
     last_uptime_s = sys->uptime_s;

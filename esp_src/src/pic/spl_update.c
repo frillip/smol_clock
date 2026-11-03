@@ -21,6 +21,7 @@
 #define APP_CHUNK_MS     2500U
 #define APP_VERIFY_MS    1000U
 #define HEALTHY_POLL_MS  5000U
+#define CONFIRM_POLL_MS  2000U
 #define HEALTHY_LIMIT_MS 150000U // the application must reach 60 s by then
 #define ENTER_MS         2000U
 #define BUSY_WAIT_MS     1000U
@@ -561,19 +562,19 @@ static void status_answered(SplUpdate *u)
         {
             reject(u, "the application was not started by the new SPL");
         }
-        else if (healthy >= APP_HEALTHY_S)
+        else if (healthy >= u->confirm_s)
         {
             go(u, SPL_UPDATE_CONFIRM);
         }
         else if (u->now - u->step_ms >= HEALTHY_LIMIT_MS)
         {
-            fail(u, "the application did not run 60 s: the new SPL is left unconfirmed");
+            fail(u, "the application did not keep running: the new SPL is left unconfirmed");
         }
         else
         {
             u->sent = false;
             u->sent_ms = u->now;
-            u->timeout_ms = HEALTHY_POLL_MS;
+            u->timeout_ms = CONFIRM_POLL_MS;
         }
         break;
     default: break;
@@ -687,6 +688,13 @@ static void command_answered(SplUpdate *u, uint16_t status, uint16_t detail, uin
         if (status == SML_RESULT_ACK)
         {
             u->step = SPL_UPDATE_DONE;
+        }
+        else if (status == SML_RESULT_NACK && detail == SML_ERROR_STATE &&
+                 u->confirm_s < APP_HEALTHY_S)
+        {
+            // An older application, which confirms after APP_HEALTHY_S.
+            u->confirm_s = APP_HEALTHY_S;
+            go(u, SPL_UPDATE_WAIT_CONFIRM);
         }
         else
         {
@@ -859,6 +867,7 @@ void spl_update_start(SplUpdate *update, const SplUpdatePort *port, const PicFil
     update->now = now_ms;
     update->next_token = 0x7800;
     update->chunks = (3U * image->length + CHUNK_BYTES - 1U) / CHUNK_BYTES;
+    update->confirm_s = APP_CONFIRM_S;
     go(update, SPL_UPDATE_STATUS);
 }
 

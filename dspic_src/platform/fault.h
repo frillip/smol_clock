@@ -10,8 +10,8 @@
  * going: a main loop stuck anywhere, an interrupt that never lets it run, or
  * an epoch timer that has stopped all reset the PIC within 4 s. Nothing else
  * feeds it, but for work that legitimately holds the main loop for seconds,
- * which calls watchdog_extend() as it goes (none does yet; the SPL writer of
- * the bootloader's phase 7 runs inside the epoch's quiet windows instead).
+ * which calls watchdog_extend() as it goes (none does yet; the SPL writer
+ * runs inside the epoch's quiet windows instead).
  *
  * The trap handlers (platform/traps.s) take the trap and the address it
  * happened at, and reset. The record of both, 32 bytes at

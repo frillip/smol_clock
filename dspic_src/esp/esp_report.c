@@ -690,9 +690,13 @@ void esp_report_stat_sys(uint32_t epoch_sequence, SML_STAT_SYS_PAYLOAD *payload)
     payload->uptime_s = epoch_sequence;
     payload->pic_version = PIC_VERSION_NUMBER;
     payload->loop_max_ms = scheduler_take_longest_pass_ms();
+    if (system_clock_fallback())
+    {
+        payload->flags |= SML_SYS_CLOCK_FALLBACK;
+    }
     if (fault_last()->kind != FAULT_NONE)
     {
-        payload->flags = SML_SYS_FAULT;
+        payload->flags |= SML_SYS_FAULT;
         payload->fault = (uint16_t)((uint16_t)fault_last()->kind << 8 | fault_last()->trap);
     }
 }
@@ -710,7 +714,8 @@ static void print_version(uint32_t version)
 static void print_boot(void)
 {
     static const char *const paths[] = {"the IPL directly", "an unconfirmed SPL", "no SPL",
-                                        "the SPL given up", "the SPL as a last resort"};
+                                        "the SPL given up", "the SPL as a last resort",
+                                        "after the SPL hung"};
     BootIpl ipl;
     BootSpl spl;
     BootApp app;
@@ -760,9 +765,9 @@ static void print_boot(void)
         return;
     }
     printf("Boot: started by ");
-    if (path == 0U)
+    if ((path & (uint16_t)~SML_BOOT_PATH_SPL_HUNG) == 0U)
     {
-        printf("the SPL");
+        printf("the SPL%s", path != 0U ? ", " : "");
     }
     for (bit = 0; bit < sizeof(paths) / sizeof(paths[0]); bit++)
     {
@@ -804,6 +809,10 @@ void esp_report_print_system(bool verbose)
     }
     printf("\n");
     fault_print();
+    if (system_clock_fallback())
+    {
+        printf("Clock: the external clock did not start: on the internal oscillator\n");
+    }
     if (verbose)
     {
         print_boot();

@@ -145,12 +145,16 @@
 #define BOOT_PATH_NO_SPL       0x04 // the SPL is not intact
 #define BOOT_PATH_SPL_GIVEN_UP 0x08 // the SPL is rejected or out of trials
 #define BOOT_PATH_LAST_RESORT  0x10 // the SPL started anyway: no application
+#define BOOT_PATH_SPL_HUNG     0x20 // the last reset was the watchdog's in the SPL (or the IPL)
 
 // ---- Limits -------------------------------------------------------------------
-#define SPL_TRIAL_LIMIT  3    // starts of an unconfirmed SPL before the application
+#define SPL_TRIAL_LIMIT  3    // starts of an unconfirmed SPL, or hangs in a row of a
+                              // confirmed one, before the application
 #define BOOT_LOOP_LIMIT  8    // hand-overs without the application reporting healthy
 #define BOOT_HEALTHY_S   30   // running that counts as healthy: zeroes attempts
 #define APP_HEALTHY_S    60   // healthy running that allows an SPL update
+#define APP_CONFIRM_S    10   // healthy running after a new SPL's hand-over that allows
+                              // CONFIRM: past two watchdog periods (not read by the IPL)
 #define BOOT_WINDOW_MS   1000 // the SPL's boot window
 #define BOOT_WATCHDOG_MS 4096 // PR128, PS1024 on the 32 kHz LPRC; 3905 ms measured
 
@@ -161,6 +165,7 @@
  * the application read the cause from the mailbox. */
 #define BOOT_RESET_CAUSES 0xC2D3
 #define BOOT_RESET_POWER  0x0003 // POR, BOR: the mailbox starts again
+#define BOOT_RESET_WDTO   0x0010 // the watchdog: with the application not running, SPL_HUNG
 
 #ifndef __ASSEMBLER__
 

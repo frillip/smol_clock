@@ -12,9 +12,9 @@ This firmware replaces the V2 firmware and the MCC-generated code it was built o
 
 The project is an MPLAB X project in [nbproject](nbproject), built with XC16 2.10 for the dsPIC33EP256GP504. No MCC is involved: the clock set-up and peripheral set-up are all in the source.
 
-The application runs behind the bootloader: the IPL in page 0 ([dspic_ipl](../dspic_ipl)) and, once it exists, the SPL in pages 1–3. It is linked from 0x002000 with [app.gld](app.gld), generated from Microchip's script for the device by [tools/gen_app_gld.py](tools/gen_app_gld.py): its entry at 0x002000, then a forwarding table of one `GOTO` per interrupt vector, which the IPL's interrupt table points at. [platform/app_vectors.s](platform/app_vectors.s) keeps the linker's own interrupt table out of the hex and the version-record page free. The configuration words are the IPL's, programmed with it, so the application's hex has none.
+The application runs behind the bootloader: the IPL in page 0 ([dspic_ipl](../dspic_ipl)) and the SPL in pages 1–3 ([dspic_spl](../dspic_spl)). It is linked from 0x002000 with [app.gld](app.gld), generated from Microchip's script for the device by [tools/gen_app_gld.py](tools/gen_app_gld.py): its entry at 0x002000, then a forwarding table of one `GOTO` per interrupt vector, which the IPL's interrupt table points at. [platform/app_vectors.s](platform/app_vectors.s) keeps the linker's own interrupt table out of the hex and the version-record page free. The configuration words are the IPL's, programmed with it, so the application's hex has none.
 
-To program a chip, use the hex `tools/make_image.py install` (in the repository root) makes from the IPL's and the application's hex files (and the SPL's, once there is one), with the settings pages 0x029800–0x02A7FF preserved. Programming the application alone leaves a chip with no reset vector and erased configuration words. For debugging, add the IPL's released hex to the project's Loadables.
+To program a chip, use the hex `tools/make_image.py install` (in the repository root) makes from the IPL's, the SPL's and the application's hex files (`tools/make_dist.py` writes it with every release), with the settings pages 0x029800–0x02A7FF preserved. Programming the application alone leaves a chip with no reset vector and erased configuration words. For debugging, add the IPL's released hex (`dspic_ipl/release/`) to the project's Loadables.
 
 The SML codec and protocol definitions are shared with the ESP. They are not copied into this folder: the project includes `common/sml_proto.h`, `common/sml.c` and `common/sml.h`, along with `common/enums.h`, directly from [common](../common). The includes (`../../common/sml.h` and friends) rely on the repository layout, so keep the two folders side by side.
 
@@ -60,7 +60,7 @@ The image tool has Python tests of its own: `python3 -m unittest discover -s tes
 
 [tools/format.sh](tools/format.sh) applies the house style: clang-format with [.clang-format](.clang-format), then [tools/style.py](tools/style.py). Firmware sources use CRLF line endings, the host tests LF.
 
-[tools/make_image.py](../tools/make_image.py) turns production `.hex` files into the bootloader's files: the application image and the SPL image the ESP sends, and the first-installation hex for a PICkit. `info` checks a file. The bootloader itself is still to come, so for now only a build linked for it (from 0x002000) makes an application image.
+[tools/make_image.py](../tools/make_image.py) turns production `.hex` files into the bootloader's files: the application image and the SPL image the ESP sends, and the first-installation hex for a PICkit. `info` checks a file.
 
 # Layout
 
@@ -355,13 +355,16 @@ They live in two erase pages reserved at the top of program flash, apart from th
 
 | Program addresses | |
 | --- | --- |
-| 0x000000–0x0297FF | The application (and the bootloader, and the application's version and CRC trailer, to come) |
+| 0x000000–0x0007FF | The IPL |
+| 0x000800–0x001FFF | The SPL, its record at 0x001F80 |
+| 0x002000–0x028FFF | The application (from 0x028800 also the SPL's test page, while the application leaves it free) |
+| 0x029000–0x0297FF | The application's version record, at 0x029000, written last on an update |
 | 0x029800–0x02A7FF | The settings store: two pages of 1024 instructions, 2KB of data each |
 | 0x02A800–0x02AFFF | The last page: the configuration words from 0x02AFEC, and nothing else |
 
-The rest of the last page is reserved too, empty, so no application code lands in it. Anything else there could only be rewritten by erasing the page, configuration words and all, and a reset before they were written back would start the chip on the erased defaults (watchdog on, another oscillator), which no bootloader could recover from. With the page left alone, the configuration words are programmed once with the bootloader and an update never erases them. The application's version and CRC trailer, for the bootloader to check, will go below the store, in 0x029000–0x0297FF, written last on an update.
+The rest of the last page is reserved too, empty, so no application code lands in it. Anything else there could only be rewritten by erasing the page, configuration words and all, and a reset before they were written back would start the chip on the erased defaults (watchdog on, another oscillator), which no bootloader could recover from. With the page left alone, the configuration words are programmed once with the IPL and an update never erases them.
 
-[drivers/flash.c](drivers/flash.c) reserves the pages with `address()` and `noload`, so the linker places nothing there and the hex has nothing for them, and writes nowhere else. Reprogramming the application therefore leaves the settings alone, as long as the programmer is told to: the project sets MPLAB's "Preserve program memory" range to 0x29800–0x2A7FF, since programming erases the whole chip first. A bootloader or update scheme must leave the range out in the same way.
+[drivers/flash.c](drivers/flash.c) reserves the pages with `address()` and `noload`, so the linker places nothing there and the hex has nothing for them, and writes nowhere else. Reprogramming the application therefore leaves the settings alone, as long as the programmer is told to: the project sets MPLAB's "Preserve program memory" range to 0x29800–0x2A7FF, since programming erases the whole chip first. The bootloader never erases it either.
 
 [settings/store.c](settings/store.c) keeps a journal in the two pages. Each page has a header with a generation number; records follow it, each with its type, length and a CRC, written a double word at a time with the CRC last. The latest intact record of each type counts, so a record cut short by a reset is passed over and the one before it stands. When a page is full, the other is erased, the latest of each record copied to it, and its header written last: until then the old page is still the one in use, whole. In the host tests a settings record of 42 bytes is written about 38 times between erases, and of 20,000 writes, 6,000 cut short by a simulated power cut at a random point, none lost a record already written. At that rate the flash's rated 10,000 erase cycles per page would take some 750,000 saves. The RTC's record is the one written often: hourly on a PCF8563 150ppm fast, which is set again at every check. About 50 fit beside the others, so each page is erased every four days or so, and lasts some 100 years.
 
@@ -381,7 +384,7 @@ ERASE is refused (`STATE`) until the application has run healthily for 60 s: the
 
 Flash is erased and written only in the flash window, slots 700–900 of the epoch, the quiet time the settings store uses: at most one page erase an epoch, chunks as they arrive while it is open. A request that needs flash is answered once it is done, up to a second later. ERASE, COMMIT and CONFIRM answer `ACCEPTED`, then `ACK`. They are refused (`BUSY`) while a settings save is pending, and the settings store waits while one of them is under way.
 
-CONFIRM is the new SPL's last step: allowed only when this start was by an unconfirmed SPL, intact and not rejected, and the application has run 60 s. Started with `SPL_GIVEN_UP` instead (the IPL gave up on an unconfirmed SPL after its trials), the application writes the SPL's reject in its first flash window, and the IPL starts the application directly until another SPL is installed. `pic -v` adds an `SPL writer:` line once it has done anything.
+CONFIRM is the new SPL's last step: allowed only when this start was by an unconfirmed SPL, intact and not rejected, and the application has run 10 s (`APP_CONFIRM_S`, past two watchdog periods: the SPL's own work is already proved by its test page). Started by an unconfirmed SPL and healthy for 30 s, the application zeroes the mailbox's trials, as it does the hand-over attempts: trials are for an SPL that never comes up, and this one has, so resets before the confirmation do not spend them. Started with `SPL_GIVEN_UP` instead (the IPL gave up on an unconfirmed SPL after its trials), the application writes the SPL's reject in its first flash window, and the IPL starts the application directly until another SPL is installed. `pic -v` adds an `SPL writer:` line once it has done anything.
 
 `pic -v` shows the boot stages ([drivers/boot_image.c](drivers/boot_image.c)): the IPL's version, the SPL's record (committed, intact, confirmed or rejected), the application's record, and how this start came about. The SPL's CRC-32 is checked through the IPL's service at 0x000200.
 
@@ -411,6 +414,10 @@ The address is the trap's return address, the instruction after the one at fault
 STAT-SYS (SML 2.6) carries the fault to the ESP, which shows it as the last reset: `last reset: watchdog`, `last reset: ADDRESS trap`.
 
 A PIC that faults again and again within 30 s of each start ends up held in the SPL by its boot-loop guard (8 starts), where `update pic force` on the ESP installs another application.
+
+## The external clock
+
+The Fail-safe Clock Monitor is on (the IPL's configuration words). Should the 40 MHz external clock stop, the chip carries on from the internal FRC with an oscillator-fail trap, which is recorded and resets like any other (`OSCILLATOR trap`). At start-up, a switch to the external clock that has not completed after some 30 ms is abandoned, and the clock runs from the FRC's PLL instead, at 80.15 MHz trimmed with OSCTUN (-0.188%) to 80.00 MHz nominal, as accurate as the FRC (a percent or so over temperature). The UARTs, the display and the link to the ESP work as before, but the time is only as good as that: the control loop was never meant to steer across such an error. It says so at start-up (`Clock: the external clock did not start: on the internal oscillator`), and STAT-SYS (SML 2.7) carries `SML_SYS_CLOCK_FALLBACK` to the ESP, which shows `CLOCK FALLBACK` with the PIC's version. The external clock is tried again at the next reset. The SPL falls back in the same way, so updates still work.
 
 # Not yet ported
 

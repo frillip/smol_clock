@@ -5,8 +5,9 @@
  * Only the store's own pages can be written. They are reserved here, at a
  * fixed address apart from the application:
  *
- *   0x000000 - 0x0297FF  application (and the bootloader, and the
- *                        application's version and CRC trailer, to come)
+ *   0x000000 - 0x0297FF  the IPL, the SPL, the application and its
+ *                        version record (the SPL's pages written through
+ *                        flash_spl_*(), for the SPL writer only)
  *   0x029800 - 0x02A7FF  the store: FLASH_STORE_PAGES erase pages
  *   0x02A800 - 0x02AFFF  the last page: the configuration words from
  *                        0x02AFEC, and nothing else

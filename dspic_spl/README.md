@@ -6,7 +6,7 @@ Nothing in it decides anything about an update. The ESP owns every step, timeout
 
 ## Start-up
 
-1. Clock to 40 MIPS, as the application's; the watchdog on (about 4 s); UART1 at 909091 baud, polled; the status LED.
+1. Clock to 40 MIPS, as the application's, or from the FRC's PLL if the external clock does not start within some 30 ms; the watchdog on (about 4 s), as the IPL already turned it on; UART1 at 909091 baud, polled; the status LED.
 2. Reads the IPL's info block, its own record (and checks its own CRC-32) and the application's record.
 3. Chooses a mode:
    - `HELD` if the application asked for the bootloader (`ENTER_BOOTLOADER` left a request in the mailbox), which it clears;

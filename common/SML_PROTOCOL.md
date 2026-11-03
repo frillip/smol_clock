@@ -6,7 +6,7 @@ SML is the link between the dsPIC33EP256GP504 timekeeper (the **PIC**) and the E
 
 The PIC keeps UTC and disciplines the clock's epoch. The ESP supplies what the PIC cannot get on its own: network time, timezone schedules, leap-second data and user commands. In return the ESP receives the PIC's state for display, logging and statistics, and tells the PIC about its network and services.
 
-This document describes protocol version 2.6 (`SML_PROTOCOL_MAJOR` 2, `SML_PROTOCOL_MINOR` 6) with settings schema 1 (`SML_SETTINGS_SCHEMA`). The definitions live in [sml_proto.h](sml_proto.h), and the reference codec in [sml.c](sml.c) and [sml.h](sml.h), all in `common/` and shared by both firmwares. TIME-AUTH is stable. Every other payload remains provisional until both ends implement it.
+This document describes protocol version 2.7 (`SML_PROTOCOL_MAJOR` 2, `SML_PROTOCOL_MINOR` 7) with settings schema 1 (`SML_SETTINGS_SCHEMA`). The definitions live in [sml_proto.h](sml_proto.h), and the reference codec in [sml.c](sml.c) and [sml.h](sml.h), all in `common/` and shared by both firmwares. TIME-AUTH is stable. Every other payload remains provisional until both ends implement it.
 
 # Physical link
 
@@ -136,13 +136,13 @@ The "V2+ PIC" column in the message catalogue and the command table records what
 | 0x80 CMD | 0x10 | CMD-USER | Both ways | 10 | ✓ Runs PIC codes, sends ESP codes | On demand |
 | | 0x20 | CMD-RESPONSE | Both ways | 12 | ✓ | One per command |
 | | 0x30 | CMD-SETTINGS | ESP→PIC | 38 | ✓ Handled | On demand |
-| 0xF0 BOOT | 0x01 | BOOT-STATUS | PIC→ESP | 56 | — Not yet (0.4.0) | SPL: on entry and every second while idle. Both: before the ACK to STATUS |
-| | 0x10 | BOOT-COMMAND | ESP→PIC | 32 | — Not yet | On demand, one at a time |
-| | 0x20 | BOOT-RESPONSE | PIC→ESP | 12 | — Not yet | One per command, two when ACCEPTED |
-| | 0x50 | BOOT-DATA | ESP→PIC | 204 | — Not yet | One chunk at a time |
-| | 0x60 | BOOT-DATA-RESPONSE | PIC→ESP | 12 | — Not yet | One per chunk |
-| | 0x90 | BOOT-VERIFY | ESP→PIC | 8 | — Not yet | One chunk at a time |
-| | 0xA0 | BOOT-VERIFY-RESPONSE | PIC→ESP | 204 | — Not yet | One per request |
+| 0xF0 BOOT | 0x01 | BOOT-STATUS | PIC→ESP | 56 | ✓ SPL and application | SPL: on entry and every second while idle. Both: before the ACK to STATUS |
+| | 0x10 | BOOT-COMMAND | ESP→PIC | 32 | ✓ | On demand, one at a time |
+| | 0x20 | BOOT-RESPONSE | PIC→ESP | 12 | ✓ | One per command, two when ACCEPTED |
+| | 0x50 | BOOT-DATA | ESP→PIC | 204 | ✓ | One chunk at a time |
+| | 0x60 | BOOT-DATA-RESPONSE | PIC→ESP | 12 | ✓ | One per chunk |
+| | 0x90 | BOOT-VERIFY | ESP→PIC | 8 | ✓ | One chunk at a time |
+| | 0xA0 | BOOT-VERIFY-RESPONSE | PIC→ESP | 204 | ✓ | One per request |
 
 # TIME class (0x10)
 
@@ -639,7 +639,7 @@ STAT-SYS is the PIC's counterpart to the uptime and version in STAT-NET: what th
 
 | Offset | Field | Type | Unit / values |
 | --- | --- | --- | --- |
-| 0 | flags | u16 | Bit 0 `FAULT`: the last reset was a fault the PIC recorded, `fault` says which. Others zero |
+| 0 | flags | u16 | Bit 0 `FAULT`: the last reset was a fault the PIC recorded, `fault` says which. Bit 1 `CLOCK_FALLBACK` (2.7): the external clock did not start, and the PIC runs from its internal oscillator. Others zero |
 | 2 | reset_cause | u16 | `SML_RESET_*` bits as found at start-up, see [Reset causes](#reset-causes). More than one may be set |
 | 4 | uptime_s | u32 | Seconds since start-up, counted in epochs; it starts under a second after reset. A drop means the PIC restarted |
 | 8 | pic_version | u32 | PIC firmware: major << 16 \| minor << 8 \| patch, as `esp_version` |
@@ -784,10 +784,10 @@ _PIC→ESP, 56 bytes._ The SPL sends it on entry (with `CHECKING` while the imag
 | 36 | `crc32_computed` | u32 | Over `app_length` instructions, unless `CHECKING`. In `APP`, the record's |
 | 40 | `build_time` | u32 | From the record |
 | 44 | `attempts` | u8 | Hand-overs since the application last reported healthy |
-| 45 | `boot` | u8 | How this start came about: `APP_DIRECT` 0x01, `UNCONFIRMED` 0x02, `NO_SPL` 0x04, `SPL_GIVEN_UP` 0x08, `LAST_RESORT` 0x10 |
+| 45 | `boot` | u8 | How this start came about: `APP_DIRECT` 0x01, `UNCONFIRMED` 0x02, `NO_SPL` 0x04, `SPL_GIVEN_UP` 0x08, `LAST_RESORT` 0x10, `SPL_HUNG` 0x20 (the last reset was the watchdog's while the SPL ran) |
 | 46 | `ipl_version` | u16 | major << 8 \| minor |
 | 48 | `spl_state` | u8 | `RECORD` 0x01, `COMMITTED` 0x02, `INTACT` 0x04, `CONFIRMED` 0x08, `REJECTED` 0x10 |
-| 49 | `trials` | u8 | Starts of the SPL while unconfirmed |
+| 49 | `trials` | u8 | Starts of an unconfirmed SPL. For a confirmed one, its hangs in a row (`SPL_HUNG`), zeroed by any other reset |
 | 50 | `healthy_s` | u16 | The application: seconds healthy since its start, saturating. The SPL: 0 |
 | 52 | `spl_crc32` | u32 | From the SPL record |
 
@@ -1200,6 +1200,7 @@ The timezone architecture document should follow the model described under [TZ-S
 
 | Date | Change |
 | --- | --- |
+| 2026-11-03 (2.7) | STAT-SYS flag bit 1 `CLOCK_FALLBACK`: the PIC runs from its internal oscillator. BOOT-STATUS `boot` bit `SPL_HUNG` (0x20), and `trials` counts a confirmed SPL's hangs in a row. The BOOT class implemented on both ends. No layout change |
 | 2026-11-03 (2.6) | STAT-SYS flag bit 0 `FAULT` and `fault` (was reserved): a watchdog reset or a trap, as the V2+ PIC records them. No layout change |
 | 2026-11-02 (2.5) | BOOT class (0xF0) defined: BOOT-STATUS (0x01, new), BOOT-COMMAND, BOOT-RESPONSE, BOOT-DATA, BOOT-DATA-RESPONSE, BOOT-VERIFY, BOOT-VERIFY-RESPONSE, with their regions, commands, keys, modes and flags. `SML_ERROR_CRC` (10) and `SML_ERROR_NOT_BLANK` (11). A layout field of any size but 2 or 4 is a byte string. Not implemented yet. No existing layout changes |
 | 2026-10-30 (2.4) | `RESYNC` defined and implemented on the V2+ PIC: every source judged again and chosen again, holdover dropped. `SML_CAUSE_RESYNC` (9). No layout change |

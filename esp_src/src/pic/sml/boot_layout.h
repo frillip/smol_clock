@@ -131,6 +131,13 @@
 #define MAILBOX_REQUEST_STAY  0xB007 // ENTER_BOOTLOADER: the SPL stays (HELD)
 #define MAILBOX_RUNNING_VALUE 0xA99A // the application is running: traps go to it
 
+/* The application's fault record (dspic_src/platform/fault.h): 32 bytes
+ * below the mailbox, kept over the reset a watchdog or a trap causes. The
+ * application's own: the IPL and the SPL never write it (their stacks grow
+ * up from low RAM and stay far below it), and no stage allocates it. */
+#define FAULT_RECORD_ADDRESS 0x7FD0
+#define FAULT_RECORD_BYTES   32
+
 // MAILBOX_BOOT bits: how this start came about (BOOT-STATUS boot,
 // SML_BOOT_PATH_* in sml_proto.h, the same bits).
 #define BOOT_PATH_APP_DIRECT   0x01 // the IPL started the application itself
@@ -138,12 +145,16 @@
 #define BOOT_PATH_NO_SPL       0x04 // the SPL is not intact
 #define BOOT_PATH_SPL_GIVEN_UP 0x08 // the SPL is rejected or out of trials
 #define BOOT_PATH_LAST_RESORT  0x10 // the SPL started anyway: no application
+#define BOOT_PATH_SPL_HUNG     0x20 // the last reset was the watchdog's in the SPL (or the IPL)
 
 // ---- Limits -------------------------------------------------------------------
-#define SPL_TRIAL_LIMIT  3    // starts of an unconfirmed SPL before the application
+#define SPL_TRIAL_LIMIT  3    // starts of an unconfirmed SPL, or hangs in a row of a
+                              // confirmed one, before the application
 #define BOOT_LOOP_LIMIT  8    // hand-overs without the application reporting healthy
 #define BOOT_HEALTHY_S   30   // running that counts as healthy: zeroes attempts
 #define APP_HEALTHY_S    60   // healthy running that allows an SPL update
+#define APP_CONFIRM_S    10   // healthy running after a new SPL's hand-over that allows
+                              // CONFIRM: past two watchdog periods (not read by the IPL)
 #define BOOT_WINDOW_MS   1000 // the SPL's boot window
 #define BOOT_WATCHDOG_MS 4096 // PR128, PS1024 on the 32 kHz LPRC; 3905 ms measured
 
@@ -154,6 +165,7 @@
  * the application read the cause from the mailbox. */
 #define BOOT_RESET_CAUSES 0xC2D3
 #define BOOT_RESET_POWER  0x0003 // POR, BOR: the mailbox starts again
+#define BOOT_RESET_WDTO   0x0010 // the watchdog: with the application not running, SPL_HUNG
 
 #ifndef __ASSEMBLER__
 

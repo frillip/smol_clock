@@ -29,6 +29,14 @@ bool pic_boot_update(const PicStoredFile *file, bool force, Stream *output);
 // its SPL, or the file is not an SPL's. A new SPL that is rejected is
 // followed by the one kept, forced, by itself.
 bool pic_boot_update_spl(const PicStoredFile *file, bool force, Stream *output);
+// The application is asked for its SPL's state a little after the PIC is
+// first heard and after each restart of it, then hourly. A missing, rejected
+// or unconfirmed SPL (an SPL update or its confirmation cut short) is
+// installed again from picfw, forced, at most three times an ESP start.
+// needs_repair: the last answer said so. repair: starts it now (false, said
+// why, if it cannot).
+bool pic_boot_spl_needs_repair(void);
+bool pic_boot_repair_spl(Stream *output);
 // Either update running.
 bool pic_boot_updating(void);
 // The last SPL update has ended: true, and done is whether it is DONE.

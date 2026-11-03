@@ -8,9 +8,9 @@ It does as little as it can, because it can never be fixed in the field: no UART
 
 1. Clears `mailbox.running`, so a trap from here on resets rather than jumping into the application.
 2. Takes RCON's reset causes into the mailbox and clears them. The SPL and the application read the cause from the mailbox, and a power-on's POR cannot linger into a later reset.
-3. Starts the mailbox again after a power-on or brown-out, or when its magic is wrong.
+3. Starts the mailbox again after a power-on or brown-out, or when its magic is wrong. Otherwise a watchdog reset while the application was not running means the SPL hung, and is marked (`SPL_HUNG`).
 4. Chooses ([ipl_select.c](ipl_select.c)):
-   1. the SPL, if intact, not rejected, and either confirmed or still within its 3 trials. An unconfirmed SPL uses a trial and runs under the watchdog (about 4 s).
+   1. the SPL, if intact, not rejected, and within its 3 trials. An unconfirmed SPL uses a trial at every start. For a confirmed one, the trials count its hangs in a row instead, zeroed by any other reset: an SPL that hangs three times running gives way to the application, and is tried again at the application's next reset. Every SPL start runs under the watchdog (about 4 s).
    2. otherwise the application, if its record is valid and its image intact. It then knows, from the mailbox, that it should install an SPL.
    3. otherwise the SPL anyway, if intact (`LAST_RESORT`).
    4. otherwise nothing: the status LED blinks, 1 s on, 1 s off.
@@ -28,7 +28,7 @@ The rest of page 0 is fixed around it:
 | 0x000204–0x00077F | Code | |
 | 0x000780 | Info block | Magic, version, services version, build time and the CRC-16 of everything below it ([ipl_info.c](ipl_info.c)) |
 
-The configuration words, in the last page, are programmed with the IPL ([ipl_config.c](ipl_config.c)). The watchdog postscaler is PS1024.
+The configuration words, in the last page, are programmed with the IPL ([ipl_config.c](ipl_config.c)). The watchdog postscaler is PS1024. The Fail-safe Clock Monitor is on (`FCKSM = CSECME`): should the external clock stop, the chip carries on from the FRC with an oscillator-fail trap. The IPL never leaves the FRC itself. The SPL and the application each fall back to the FRC's PLL when their switch to the external clock does not complete.
 
 ## Files
 
@@ -51,7 +51,7 @@ An MPLAB X project for XC16, `-O1`, with the C start-up but no data initialisati
 The hex MPLAB writes is not the one to program. [make_image.py](../tools/make_image.py) checks page 0 and fills in the info block's build time and CRC-16:
 
 ```
-python3 ../tools/make_image.py ipl dist/default/production/dspic_ipl.production.hex -o ipl-0.1.0.hex
+python3 ../tools/make_image.py ipl dist/default/production/dspic_ipl.production.hex -o release/ipl-1.0.0.hex
 ```
 
 A released IPL's hex is committed as it was released, and the first-installation hex and the other projects' Loadables use that file, so every clock carries the same IPL bits.
@@ -65,7 +65,7 @@ cd tests/host && make
 ```
 
 The selection runs against a model of program memory:
-- every combination of the SPL's state (blank, partial, torn commit, bad record CRC, corrupt code, committed, confirmed, torn confirm, rejected, torn reject, odd length), the application's and the trial count, checked against the rules written out again;
-- the sequences that matter: a new SPL that never comes up, a power cut in between, a good one confirmed, an update of either cut short;
+- every combination of the SPL's state (blank, partial, torn commit, bad record CRC, corrupt code, committed, confirmed, torn confirm, rejected, torn reject, odd length), the application's, the trial count and the reset (software, the watchdog in the application, the watchdog in the SPL), checked against the rules written out again;
+- the sequences that matter: a new SPL that never comes up, a power cut in between, a good one confirmed, a confirmed one that hangs, an update of either cut short;
 - 3000 torn commit, confirm and reject words;
 - the CRC-32 against the shared one, across a 64 K boundary.

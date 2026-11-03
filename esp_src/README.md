@@ -305,7 +305,7 @@ The SPL is written by the running application, not by itself ([src/pic/spl_updat
 - ERASE, DATA, VERIFY and COMMIT of region SPL, as for an application. The application does the flash work in its flash window, one page erase an epoch, so each answer can take up to a second. While a request is out, the ESP sends the PIC nothing else.
 - ENTER_BOOTLOADER: the IPL starts the new SPL, unconfirmed. Its BOOT-STATUS must come within 25 s.
 - Through the new SPL, a test: ERASE, four chunks of DATA, VERIFY and COMMIT of the test page, then ERASE again. Then RUN.
-- Once the application has run 60 s again, CONFIRM. The IPL trusts the SPL from then on.
+- Once the application has run 10 s again (`APP_CONFIRM_S`), CONFIRM. The IPL trusts the SPL from then on. An older application refuses it (STATE) until 60 s: the ESP asks again then.
 
 ```
 SPL update: to 0.2.0, 1800 instructions
@@ -317,13 +317,19 @@ SPL update: committing
 SPL update: starting the new SPL
 SPL update: testing the new SPL
 SPL update: back to the application
-SPL update: confirming once the application has run 60 s
+SPL update: confirming once the application has run 10 s
 SPL update: DONE, 0.2.0 confirmed, <seconds> s
 ```
 
 A failure before COMMIT starts a new pass from STATUS, up to three. Meanwhile the IPL starts the application directly, as there is no intact SPL. A new SPL that never comes up (the IPL gives up on it after its trials and starts the application, which rejects it) or fails its test ends `REJECTED`, and the ESP installs the SPL it kept, forced, by itself. If that one is rejected too, or none was kept, the clock carries on with the application started directly by the IPL until an SPL is installed.
 
-`update install` and the daily check do everything due in one go. An ESP update restarts the ESP at once, with a flag left in NVS (namespace `updater`). After the restart, once the network is up and the PIC answers (30 s at the soonest), the ESP fetches the manifest again, every 30 s up to five times, and carries on with the PIC. The SPL comes first when it is offered and not known to be current (the update's first STATUS ends it at once if it is), then the application as soon as the SPL's update is DONE. What follows the command is reported on every console. While any of this is under way, `update install` says so and does nothing. Without the update server, `update spl force` installs the newest staged SPL.
+`update install` and the daily check first do what `update check` does: what is offered is said, and the PIC's application and SPL offered are staged. Then everything due, in one go. An ESP update restarts the ESP at once, with a record in NVS (namespace `updater`) of the PIC's files staged for it. After the restart, as soon as the PIC's application answers, the ESP installs those from picfw, without the network. Should they have gone from picfw, it fetches the manifest again once the network is up, every 30 s up to five times. The SPL comes first when it is offered and not known to be current (the update's first STATUS ends it at once if it is), then the application as soon as the SPL's update is DONE. What follows the command is reported on every console. While any of this is under way, `update install` says so and does nothing. Without the update server, `update spl force` installs the newest staged SPL.
+
+## The SPL's state, and its repair
+
+The ESP asks the application for BOOT-STATUS 5 s after the PIC is first heard and after each restart of it, then hourly. `pic boot` shows the answer (`SPL: confirmed (1.0.0, asked 12 s ago)`). An SPL that is missing, rejected, or committed but never confirmed (an SPL update or its confirmation cut short, by a power cut say) is installed again from picfw, forced, by itself: an unconfirmed one from its own file, else the newest staged SPL not rejected since the ESP started. At most three times per ESP start. `update pic` does the same first, then the application, so it is not refused for want of an SPL.
+
+On the PIC's side, an application started by an unconfirmed SPL that runs healthily for 30 s zeroes the SPL's trials, so ordinary resets before the confirmation (`pic reset`, a power cut) cannot spend them and have a working SPL rejected.
 
 `pic boot` prints what the SPL reports (its mode, versions, whether the application is valid) when the PIC is in it, or else the application's version, then how the last update went. `pic boot run` and `pic boot hold` send RUN and HOLD to the SPL. After RUN, or when the SPL has sent no BOOT-STATUS for 5 s with no update running, the ESP stops treating the PIC as in its SPL and its link's traffic resumes, which brings the new application's link into SML mode and its STAT-SYS. `update` lists the staged files (`-v` also the SPL slots), and `update erase pic|spl|all` empties their slots (the sector holding each header is erased).
 

@@ -2,7 +2,8 @@
  * The SPL's hardware (spl_port.h): the dsPIC33EP256GP504 on V2, polled.
  * No interrupt is ever enabled.
  *
- *   clock     FRC to the primary PLL, 40 MIPS, as the application's
+ *   clock     FRC to the primary PLL, 40 MIPS, as the application's; the
+ *             FRC's PLL instead if the external clock does not start
  *   time      Timer2/3 as one 32-bit timer, 1:64: 625 kHz, counted into ms
  *   UART1     909091 baud 8N1 (BRGH, divisor 11), RC7 TX (RP55), RC6 RX
  *             (RPI54), as the application's link to the ESP
@@ -26,6 +27,11 @@
 #define RING_SIZE 256U // a power of two
 #define RING_MASK (RING_SIZE - 1U)
 
+#define NOSC_PRIPLL  0x03U
+#define NOSC_FRCPLL  0x01U
+#define SWITCH_POLLS 20000U // polls of OSWEN on the FRC: some 30 ms
+#define OSCTUN_FALLBACK 0x3CU // TUN -4: the FRC 0.188% slow
+
 // Reset values, to leave the chip as the application expects it.
 #define CLKDIV_RESET 0x3040U
 #define PLLFBD_RESET 0x0030U
@@ -40,20 +46,50 @@ static uint32_t last_ticks;
 static uint32_t ticks_left; // not yet a whole ms
 static uint32_t ms;
 
+// Switches to nosc and waits for it and the PLL's lock, some 30 ms at most
+// (a switch to a clock that is not there never completes). False if it did
+// not: the switch abandoned, still on the FRC.
+static bool clock_switch(uint8_t nosc)
+{
+    uint16_t polls;
+
+    __builtin_write_OSCCONH(nosc);
+    __builtin_write_OSCCONL((uint8_t)(OSCCON | 0x01U));
+    for (polls = 0; OSCCONbits.OSWEN != 0U; polls++)
+    {
+        if (polls >= SWITCH_POLLS)
+        {
+            __builtin_write_OSCCONL((uint8_t)(OSCCON & 0xFEU));
+            return false;
+        }
+    }
+    for (polls = 0; OSCCONbits.LOCK != 1U; polls++)
+    {
+        if (polls >= SWITCH_POLLS)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+
 static void clock_init(void)
 {
     // As the application's clock_init(): EC 40 MHz, PLLPRE 8, PLLDIV 62
     // (M 64), PLLPOST 4: Fosc 80 MHz, 40 MIPS.
     CLKDIV = 0x3146;
     PLLFBD = 0x3E;
-    __builtin_write_OSCCONH((uint8_t)0x03); // PRIPLL
-    __builtin_write_OSCCONL((uint8_t)(OSCCON | 0x01));
-    while (OSCCONbits.OSWEN != 0)
+    if (clock_switch(NOSC_PRIPLL))
     {
+        return;
     }
-    while (OSCCONbits.LOCK != 1)
-    {
-    }
+    // No external clock: the FRC, PLLPRE 2, PLLDIV 85 (M 87), PLLPOST 4:
+    // Fosc 80.15 MHz, trimmed by OSCTUN -4 (-0.188%) to 80.00 MHz nominal.
+    OSCTUN = OSCTUN_FALLBACK;
+    CLKDIV = 0x3140;
+    PLLFBD = 0x55;
+    (void)clock_switch(NOSC_FRCPLL);
 }
 
 
@@ -271,6 +307,7 @@ void spl_port_hand_over(volatile BootMailbox *mailbox)
     {
     }
     CLKDIV = CLKDIV_RESET;
+    OSCTUN = 0; // untrimmed, as reset leaves it
     PLLFBD = PLLFBD_RESET;
 
     ClrWdt();

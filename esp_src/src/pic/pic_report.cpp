@@ -247,7 +247,8 @@ static void print_system(Stream *output, bool verbose)
     {
         output->printf("PIC:      %s, up ", version);
         time_print_duration(output, sys.uptime_s);
-        output->printf(", last reset: %s\n", pic_report_last_reset(&sys, reset, sizeof(reset)));
+        output->printf(", last reset: %s%s\n", pic_report_last_reset(&sys, reset, sizeof(reset)),
+                       (sys.flags & SML_SYS_CLOCK_FALLBACK) != 0U ? ", CLOCK FALLBACK" : "");
         return;
     }
     output->printf("\n=== PIC system ===\n");
@@ -258,6 +259,11 @@ static void print_system(Stream *output, bool verbose)
     output->printf("Reset:    %s (0x%04X)\n", pic_report_last_reset(&sys, reset, sizeof(reset)),
                    sys.reset_cause);
     output->printf("Loop:     longest pass %u ms in the last second\n", sys.loop_max_ms);
+    if ((sys.flags & SML_SYS_CLOCK_FALLBACK) != 0U)
+    {
+        output->printf("Clock:    FALLBACK: the external clock did not start, on the internal "
+                       "oscillator\n");
+    }
 }
 
 // Compact: "UTC:      <UTC> +/-120 ns, GNSS LOCKED" and the local time.

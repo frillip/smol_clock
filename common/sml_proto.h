@@ -68,7 +68,7 @@
 #define SML_TZ_TRANSITION_MAX 8U
 #define SML_SETTINGS_SCHEMA   1U
 #define SML_PROTOCOL_MAJOR    2U
-#define SML_PROTOCOL_MINOR    6U
+#define SML_PROTOCOL_MINOR    7U
 
 #define SML_CLASS_TIME 0x10U
 #define SML_CLASS_TZ   0x20U
@@ -911,8 +911,12 @@ typedef struct
  * loop_max_ms: the longest pass of the PIC's main loop since the previous
  * STAT-SYS (normally the last second): work that held everything else up.
  * flags SML_SYS_FAULT: the last reset was a fault the PIC recorded, and
- * fault says which: SML_FAULT_* << 8 | SML_TRAP_* (SML 2.6). */
-#define SML_SYS_FAULT 0x0001U
+ * fault says which: SML_FAULT_* << 8 | SML_TRAP_* (SML 2.6).
+ * flags SML_SYS_CLOCK_FALLBACK: the external clock did not start, and the
+ * PIC runs from its internal oscillator, at about the right rate but only as
+ * accurate as that (SML 2.7). */
+#define SML_SYS_FAULT          0x0001U
+#define SML_SYS_CLOCK_FALLBACK 0x0002U
 
 #define SML_FAULT_WATCHDOG 1U // the watchdog: the main loop or the epoch stopped
 #define SML_FAULT_TRAP     2U // a trap, below
@@ -1123,6 +1127,7 @@ typedef struct
 #define SML_BOOT_PATH_NO_SPL       0x04U // the SPL is not intact
 #define SML_BOOT_PATH_SPL_GIVEN_UP 0x08U // the SPL is rejected or out of trials
 #define SML_BOOT_PATH_LAST_RESORT  0x10U // the SPL started despite that: no application
+#define SML_BOOT_PATH_SPL_HUNG     0x20U // the last reset was the watchdog's in the SPL
 // BOOT-STATUS spl_state.
 #define SML_SPL_STATE_RECORD    0x01U // record present, its CRC good
 #define SML_SPL_STATE_COMMITTED 0x02U
@@ -1152,7 +1157,7 @@ typedef struct
     uint8_t boot;            // SML_BOOT_PATH_*
     uint16_t ipl_version;    // major << 8 | minor
     uint8_t spl_state;       // SML_SPL_STATE_*
-    uint8_t trials;          // starts of the SPL while unconfirmed
+    uint8_t trials;          // starts of an unconfirmed SPL, or a confirmed one's hangs in a row
     uint16_t healthy_s;      // the application: seconds healthy, saturating; the SPL: 0
     uint32_t spl_crc32;      // from the SPL record
 } SML_BOOT_STATUS_PAYLOAD;

@@ -7,6 +7,12 @@
 #include "../../common/boot_layout.h"
 #include "../../common/sml.h"
 
+// Healthy running before CONFIRM (the host tests build it as an older
+// application's, APP_HEALTHY_S, too).
+#ifndef SPL_WRITER_CONFIRM_S
+#define SPL_WRITER_CONFIRM_S APP_CONFIRM_S
+#endif
+
 #define ERASED_WORD   0xFFFFFFUL
 #define DEVICE_ID     0xFF0000UL // where DEVID reads
 #define RECORD_PAGE   (SPL_RECORD_ADDRESS & ~(BOOT_PAGE_ADDRESSES - 1UL))
@@ -376,7 +382,7 @@ static uint16_t start_writing(const uint8_t *command, bool *accepted)
         }
         if ((app.boot & SML_BOOT_PATH_UNCONFIRMED) == 0U ||
             (w.status.spl_state & (wanted | SML_SPL_STATE_REJECTED)) != wanted ||
-            app.healthy_s < APP_HEALTHY_S)
+            app.healthy_s < SPL_WRITER_CONFIRM_S)
         {
             return SML_ERROR_STATE;
         }

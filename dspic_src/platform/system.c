@@ -32,6 +32,45 @@ void system_init(void)
 }
 
 
+// OSCCON NOSC: the primary oscillator (EC) through the PLL, and the FRC
+// through it.
+#define NOSC_PRIPLL 0x03U
+#define NOSC_FRCPLL 0x01U
+// A switch normally completes within about 1 ms (the PLL's lock). On the
+// FRC (3.685 MIPS) this many polls of OSWEN are some 30 ms: past that, the
+// new clock is not there.
+#define SWITCH_POLLS 20000U
+#define OSCTUN_FALLBACK 0x3CU // TUN -4: the FRC 0.188% slow
+
+static bool clock_fallback;
+
+// Switches to nosc, waits for it, and for the PLL's lock. False if it did
+// not complete: the switch abandoned, still on the FRC.
+static bool clock_switch(uint8_t nosc)
+{
+    uint16_t polls;
+
+    __builtin_write_OSCCONH(nosc);
+    __builtin_write_OSCCONL((uint8_t)(OSCCON | 0x01U));
+    for (polls = 0; OSCCONbits.OSWEN != 0U; polls++)
+    {
+        if (polls >= SWITCH_POLLS)
+        {
+            __builtin_write_OSCCONL((uint8_t)(OSCCON & 0xFEU)); // abandoned
+            return false;
+        }
+    }
+    for (polls = 0; OSCCONbits.LOCK != 1U; polls++)
+    {
+        if (polls >= SWITCH_POLLS)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+
 static void clock_init(void)
 {
     // FRCDIV FRC/2; PLLPRE 8; DOZE 1:8; PLLPOST 1:4; DOZEN disabled; ROI disabled;
@@ -52,14 +91,25 @@ static void clock_init(void)
     PMD4 = 0x00;
     // PTGMD enabled; DMA0MD enabled;
     PMD7 = 0x00;
-    // CF no clock failure; NOSC PRIPLL; CLKLOCK unlocked; OSWEN Switch is Complete;
-    __builtin_write_OSCCONH((uint8_t)(0x03));
-    __builtin_write_OSCCONL((uint8_t)(0x01));
-    // Wait for Clock switch to occur
-    while (OSCCONbits.OSWEN != 0)
-        ;
-    while (OSCCONbits.LOCK != 1)
-        ;
+    // EC 40 MHz, PLLPRE 8, PLLDIV 62 (M 64), PLLPOST 4: Fosc 80 MHz.
+    if (clock_switch(NOSC_PRIPLL))
+    {
+        return;
+    }
+    // No external clock: the FRC (7.37 MHz), PLLPRE 2, PLLDIV 85 (M 87),
+    // PLLPOST 4: Fosc 80.15 MHz, 0.19% fast, which OSCTUN -4 (-0.188%)
+    // trims to 80.00 MHz, nominal; the FRC's own error remains.
+    clock_fallback = true;
+    OSCTUN = OSCTUN_FALLBACK;
+    CLKDIV = 0x3140;
+    PLLFBD = 0x55;
+    (void)clock_switch(NOSC_FRCPLL);
+}
+
+
+bool system_clock_fallback(void)
+{
+    return clock_fallback;
 }
 
 

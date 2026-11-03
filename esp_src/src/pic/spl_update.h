@@ -23,8 +23,9 @@
  *               DATA, VERIFY, COMMIT, then ERASE again, so it is shown to
  *               erase, write and commit before anything depends on it
  *   RUN         the hand-over, and STAT-SYS from the application
- *   CONFIRM     once the application has run 60 s (STATUS every 5 s):
- *               CONFIRM, and the SPL is the one the IPL trusts
+ *   CONFIRM     once the application has run APP_CONFIRM_S (10 s; STATUS
+ *               every 2 s): CONFIRM, and the SPL is the one the IPL trusts.
+ *               Refused (STATE) by an older application: again at 60 s
  *
  * A failed pass before COMMIT (a write that went wrong, no answer) starts
  * again from STATUS, three passes at most; the clock runs its application
@@ -116,6 +117,8 @@ typedef struct
     bool have_status;
     uint8_t status[56];
     uint8_t passes;
+    uint16_t confirm_s; // healthy running before CONFIRM: APP_CONFIRM_S, else an older
+                        // application's APP_HEALTHY_S
     uint32_t chunk;
     uint32_t chunks;
     uint32_t written;

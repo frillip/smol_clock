@@ -60,6 +60,13 @@ void boot_service(uint32_t uptime_s)
     if (valid && healthy_s >= BOOT_HEALTHY_S)
     {
         mailbox.attempts = 0;
+        // Started by an unconfirmed SPL, and running healthily: it starts
+        // the application, so its trials (meant for an SPL that never comes
+        // up) are not spent by ordinary resets before it is confirmed.
+        if ((mailbox.boot & BOOT_PATH_UNCONFIRMED) != 0U)
+        {
+            mailbox.trials = 0;
+        }
     }
 }
 

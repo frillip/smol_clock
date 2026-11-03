@@ -3,7 +3,8 @@
  * programmer writes, so they go with the IPL: programmed once, at first
  * installation, with it. The SPL's and the application's hex files carry
  * none (tools/make_image.py drops any it finds). As V2+ 0.3.1 had them in
- * dspic_src/platform/system.c, but for the watchdog postscaler: PS1024.
+ * dspic_src/platform/system.c, but for the watchdog postscaler (PS1024) and
+ * the Fail-safe Clock Monitor (on).
  */
 #include <xc.h>
 
@@ -42,8 +43,13 @@
 #pragma config OSCIOFNC = ON
 // Peripheral pin select configuration: Allow multiple reconfigurations
 #pragma config IOL1WAY = OFF
-// Clock Switching Mode bits: Clock switching is enabled,Fail-safe Clock Monitor is disabled
-#pragma config FCKSM = CSECMD
+// Clock Switching Mode bits: clock switching and the Fail-safe Clock Monitor
+// both enabled. Should the external clock stop, the chip goes on from the FRC
+// with an oscillator-fail trap, instead of stopping: the application records
+// the trap and resets, and a stage whose switch to the external clock does
+// not complete runs from the FRC's PLL instead (both the SPL and the
+// application). The IPL itself never leaves the FRC.
+#pragma config FCKSM = CSECME
 
 // FOSCSEL
 // Oscillator Source Selection: FRC

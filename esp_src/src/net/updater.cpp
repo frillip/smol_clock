@@ -46,41 +46,74 @@ typedef bool (*Sink)(void *context, const uint8_t *data, size_t length);
 
 static Stream *progress_output;
 // The PIC's updates to follow an ESP update's restart ("update install", the
-// daily check): a flag in NVS, kept over the restart into the new image (and
-// a power cut), cleared as it is read.
+// daily check): which of the PIC's files staged before it, in NVS, kept over
+// the restart into the new image (and a power cut), cleared as it is read.
 #define RESUME_NAMESPACE "updater"
-#define RESUME_KEY       "resume"
+#define RESUME_KEY       "resume2"
+#define RESUME_FORMAT    1U
+#define RESUME_SPL       0x01U
+#define RESUME_APP       0x02U
 
-static void resume_mark(bool on)
+typedef struct
+{
+    uint8_t format;
+    uint8_t parts; // RESUME_*: none, the manifest again once the network is up
+    uint32_t spl_version;
+    uint8_t spl_sha256[SHA256_BYTES];
+    uint32_t app_version;
+    uint8_t app_sha256[SHA256_BYTES];
+} ResumeRecord;
+
+static ResumeRecord resume_record;
+
+static void resume_clear(void)
 {
     Preferences store;
 
     store.begin(RESUME_NAMESPACE, false);
-    if (on)
-    {
-        store.putUChar(RESUME_KEY, 1);
-    }
-    else if (store.isKey(RESUME_KEY))
+    if (store.isKey(RESUME_KEY))
     {
         store.remove(RESUME_KEY);
+    }
+    if (store.isKey("resume"))
+    {
+        store.remove("resume"); // the flag of 0.3.16 to 0.3.21
     }
     store.end();
 }
 
 
-static bool resume_take(void)
+static void resume_save(const ResumeRecord *record)
 {
     Preferences store;
-    bool on;
 
     store.begin(RESUME_NAMESPACE, false);
-    on = store.getUChar(RESUME_KEY, 0) != 0;
-    if (on)
-    {
-        store.remove(RESUME_KEY);
-    }
+    store.putBytes(RESUME_KEY, record, sizeof(*record));
     store.end();
-    return on;
+}
+
+
+static bool resume_take(ResumeRecord *record)
+{
+    Preferences store;
+    bool found;
+
+    store.begin(RESUME_NAMESPACE, true);
+    found = store.getBytesLength(RESUME_KEY) == sizeof(*record) &&
+            store.getBytes(RESUME_KEY, record, sizeof(*record)) == sizeof(*record) &&
+            record->format == RESUME_FORMAT;
+    store.end();
+    // The older flag means the same, without the files.
+    if (!found)
+    {
+        store.begin(RESUME_NAMESPACE, true);
+        found = store.getUChar("resume", 0) != 0;
+        store.end();
+        memset(record, 0, sizeof(*record));
+        record->format = RESUME_FORMAT;
+    }
+    resume_clear();
+    return found;
 }
 static bool resume_read;
 static bool resuming; // after the restart, until the PIC's updates start
@@ -585,11 +618,11 @@ static bool pic_compatible(const PicStoredFile *file, Stream *output)
 }
 
 
-// The PIC's application into picfw, unless a slot holds it already; then
-// its install from there, run by pic_boot. False, said why, if not started.
-static bool install_pic(const ManifestEntry *entry, uint32_t running, bool force, Stream *output)
+// The PIC's application into picfw, unless a slot holds it already, checked.
+// False, said why, if there is no usable file.
+static bool stage_app(const ManifestEntry *entry, uint32_t running, PicStoredFile *file,
+                      Stream *output)
 {
-    PicStoredFile file;
     uint32_t offered = 0;
 
     (void)pic_file_version(entry->pic.version, &offered);
@@ -598,39 +631,67 @@ static bool install_pic(const ManifestEntry *entry, uint32_t running, bool force
         output->printf("PIC update: no picfw partition: reflash the ESP over USB\n");
         return false;
     }
-    if (pic_boot_updating())
-    {
-        output->printf("PIC update: one is running already\n");
-        return false;
-    }
-    if (pic_store_find(PIC_FILE_APP, offered, entry->pic.sha256, &file))
+    if (pic_store_find(PIC_FILE_APP, offered, entry->pic.sha256, file))
     {
         output->printf("PIC update: %s already staged in slot %u\n", entry->pic.version,
-                       file.slot);
+                       file->slot);
     }
     else
     {
         uint8_t slot = pic_store_choose(PIC_FILE_APP, running);
 
         output->printf("PIC update: downloading %s into slot %u\n", entry->pic.version, slot);
-        if (!stage_file(&entry->pic, PIC_FILE_APP, slot, &file, "PIC update", output))
+        if (!stage_file(&entry->pic, PIC_FILE_APP, slot, file, "PIC update", output))
         {
             return false;
         }
     }
-    if (file.header.version != offered)
+    if (file->header.version != offered)
     {
-        (void)pic_store_erase(PIC_FILE_APP, file.slot);
+        (void)pic_store_erase(PIC_FILE_APP, file->slot);
         output->printf("PIC update: the file holds another version than the manifest says: slot "
                        "%u emptied\n",
-                       file.slot);
+                       file->slot);
         return false;
     }
-    if (!pic_compatible(&file, output))
+    return pic_compatible(file, output);
+}
+
+
+// The application's update after an SPL update (automatic, "update install",
+// an SPL repaired first): its staged file, once no PIC update runs.
+static bool app_after_spl;
+static PicStoredFile chained_app;
+static bool chained_force;
+
+// An application file installed, run by pic_boot. An SPL that the
+// application last reported missing, rejected or unconfirmed is installed
+// again first, and the application chained after it. False, said why, if
+// not started.
+static bool start_app(const PicStoredFile *file, bool force, Stream *output)
+{
+    if (pic_boot_updating())
     {
+        output->printf("PIC update: one is running already\n");
         return false;
     }
-    return pic_boot_update(&file, force, output);
+    if (pic_boot_spl_needs_repair() && pic_boot_repair_spl(output))
+    {
+        chained_app = *file;
+        chained_force = force;
+        app_after_spl = true;
+        output->printf("PIC update: the application follows the SPL\n");
+        return true;
+    }
+    return pic_boot_update(file, force, output);
+}
+
+
+static bool install_pic(const ManifestEntry *entry, uint32_t running, bool force, Stream *output)
+{
+    PicStoredFile file;
+
+    return stage_app(entry, running, &file, output) && start_app(&file, force, output);
 }
 
 
@@ -688,31 +749,68 @@ static bool install_spl(const ManifestEntry *entry, bool force, Stream *output)
 static void stage_offered(const ManifestEntry *entry, Stream *output);
 static void stage_offered_spl(const ManifestEntry *entry, Stream *output);
 
-// The application's update after an SPL update (automatic, "update pull"):
-// the manifest it was offered with, once no PIC update runs.
-static bool app_after_spl;
-static ManifestEntry chained;
+// The PIC's files, staged: an SPL update, then the application chained
+// after it if it is newer than the one the PIC runs; else the application
+// alone if newer. Either may be absent.
+static void pic_updates_from(const PicStoredFile *spl_file, const PicStoredFile *app_file,
+                             Stream *output)
+{
+    note_pic();
+    if (spl_file != NULL && pic_boot_update_spl(spl_file, false, output))
+    {
+        if (app_file != NULL)
+        {
+            chained_app = *app_file;
+            chained_force = false;
+            app_after_spl = true;
+        }
+        return;
+    }
+    if (app_file == NULL)
+    {
+        return;
+    }
+    if (pic_heard && app_file->header.version <= pic_version_heard)
+    {
+        output->printf("PIC: the application staged is not newer than the one it runs\n");
+        return;
+    }
+    if (pic_compatible(app_file, output))
+    {
+        (void)start_app(app_file, false, output);
+    }
+}
 
-// The PIC's updates in order: its SPL when offered and not known to be
-// current (the update's own STATUS ends it at once if it is), then the
-// application, chained. Else the application if due, else staging.
+
+// The PIC's updates in order from the manifest: its SPL when offered and
+// not known to be current (the update's own STATUS ends it at once if it
+// is), then the application if newer. Both staged first.
 static void pic_updates(const ManifestEntry *entry, Stream *output)
 {
     uint32_t running_version;
+    uint32_t offered = 0;
+    PicStoredFile spl_file;
+    PicStoredFile app_file;
     SplDue due = spl_due(entry, false, &running_version);
+    bool have_spl = false;
+    bool have_app = false;
 
-    if ((due == SPL_DUE || due == SPL_NOT_KNOWN) && install_spl(entry, false, output))
+    if ((due == SPL_DUE || due == SPL_NOT_KNOWN) && pic_store_present())
     {
-        chained = *entry;
-        app_after_spl = true;
-        return;
+        stage_offered_spl(entry, output);
+        have_spl = pic_file_version(entry->pic_spl.version, &offered) &&
+                   pic_store_find(PIC_FILE_SPL, offered, entry->pic_spl.sha256, &spl_file);
     }
     if (pic_due(entry, false, &running_version) == PIC_DUE)
     {
-        (void)install_pic(entry, running_version, false, output);
+        have_app = stage_app(entry, running_version, &app_file, output);
+    }
+    if (!have_spl && !have_app)
+    {
+        stage_offered(entry, output);
         return;
     }
-    stage_offered(entry, output);
+    pic_updates_from(have_spl ? &spl_file : NULL, have_app ? &app_file : NULL, output);
 }
 
 
@@ -732,7 +830,6 @@ static bool pic_wanted(const ManifestEntry *entry)
 static void chain_service(void)
 {
     bool done = false;
-    uint32_t running_version;
     Stream *output = console_stream();
 
     if (!app_after_spl || pic_boot_updating())
@@ -746,13 +843,14 @@ static void chain_service(void)
         return;
     }
     note_pic();
-    if (pic_due(&chained, false, &running_version) == PIC_DUE)
+    if (!chained_force && pic_heard && chained_app.header.version <= pic_version_heard)
     {
-        (void)install_pic(&chained, running_version, false, output);
+        console_printf("PIC: the application is up to date\n");
+        return;
     }
-    else
+    if (pic_compatible(&chained_app, output))
     {
-        stage_offered(&chained, output);
+        (void)pic_boot_update(&chained_app, chained_force, output);
     }
 }
 
@@ -856,7 +954,7 @@ static void install_offline(Stream *output, bool force)
     }
     output->printf("PIC update: without the update server, the staged %s from slot %u\n", text,
                    file.slot);
-    (void)pic_boot_update(&file, force, output);
+    (void)start_app(&file, force, output);
 }
 
 // No manifest: a staged SPL instead, forced only: the newest.
@@ -959,6 +1057,42 @@ static bool start(Stream *output, ManifestEntry *entry)
 }
 
 
+// What is offered, said, and the PIC's files staged: "update check", and
+// the first part of "update install" and the daily check.
+static void check_and_stage(const ManifestEntry *entry, Stream *output)
+{
+    uint32_t running_version;
+
+    available = esp_due(entry, false);
+    pic_available = pic_due(entry, false, &running_version) == PIC_DUE ||
+                    spl_due(entry, false, &running_version) == SPL_DUE;
+    print_offers(output, entry);
+    stage_offered(entry, output);
+    stage_offered_spl(entry, output);
+}
+
+
+static void install_esp_reported(Stream *output, const ManifestEntry *entry, bool restart,
+                                 bool then_pic);
+
+// Everything due, after check_and_stage(): the ESP's, restarting at once,
+// with the PIC's to follow from the staged files; else the PIC's.
+static void install_due(const ManifestEntry *entry, Stream *output)
+{
+    if (esp_due(entry, false))
+    {
+        install_esp_reported(output, entry, true, true);
+        return;
+    }
+    if (pic_wanted(entry))
+    {
+        pic_updates(entry, output);
+        return;
+    }
+    output->printf("Update: nothing to install\n");
+}
+
+
 bool updater_check(Stream *output)
 {
     ManifestEntry entry;
@@ -969,12 +1103,8 @@ bool updater_check(Stream *output)
     {
         return false;
     }
-    available = esp_due(&entry, false);
-    pic_available = pic_due(&entry, false, &running_version) == PIC_DUE;
-    pic_available = pic_available || spl_due(&entry, false, &running_version) == SPL_DUE;
-    print_offers(output, &entry);
-    stage_offered(&entry, output);
-    stage_offered_spl(&entry, output);
+    (void)running_version;
+    check_and_stage(&entry, output);
     return available || pic_available;
 }
 
@@ -992,7 +1122,24 @@ static void install_esp_reported(Stream *output, const ManifestEntry *entry, boo
                               : ", then restarting");
     if (restart && then_pic)
     {
-        resume_mark(true);
+        ResumeRecord record;
+        PicStoredFile file;
+
+        memset(&record, 0, sizeof(record));
+        record.format = RESUME_FORMAT;
+        if (entry->pic_spl.present && pic_file_version(entry->pic_spl.version, &record.spl_version) &&
+            pic_store_find(PIC_FILE_SPL, record.spl_version, entry->pic_spl.sha256, &file))
+        {
+            record.parts |= RESUME_SPL;
+            memcpy(record.spl_sha256, entry->pic_spl.sha256, SHA256_BYTES);
+        }
+        if (entry->pic.present && pic_file_version(entry->pic.version, &record.app_version) &&
+            pic_store_find(PIC_FILE_APP, record.app_version, entry->pic.sha256, &file))
+        {
+            record.parts |= RESUME_APP;
+            memcpy(record.app_sha256, entry->pic.sha256, SHA256_BYTES);
+        }
+        resume_save(&record);
     }
     running = true;
     progress_output = output;
@@ -1001,7 +1148,7 @@ static void install_esp_reported(Stream *output, const ManifestEntry *entry, boo
     running = false;
     if (restart && then_pic)
     {
-        resume_mark(false); // not restarted: nothing to resume
+        resume_clear(); // not restarted: nothing to resume
     }
     print_result(output, "ESP update", result);
     if (result == RESULT_UPDATE_OK)
@@ -1026,19 +1173,8 @@ void updater_pull(Stream *output)
     {
         return;
     }
-    if (esp_due(&entry, false))
-    {
-        install_esp_reported(output, &entry, true, true);
-        return;
-    }
-    if (pic_wanted(&entry))
-    {
-        pic_updates(&entry, output);
-        return;
-    }
-    print_offers(output, &entry);
-    stage_offered(&entry, output);
-    stage_offered_spl(&entry, output);
+    check_and_stage(&entry, output);
+    install_due(&entry, output);
 }
 
 
@@ -1118,37 +1254,57 @@ void updater_pic(Stream *output, bool force)
 }
 
 
-// After an ESP update's restart: the PIC's updates, once the network is up
-// and the PIC heard from. The manifest is fetched again, every 30 s until it
-// comes, RESUME_TRIES times at most.
-#define RESUME_WAIT_MS  30000U
-#define RESUME_TRIES    5U
-
+// After an ESP update's restart: the PIC's updates from the files staged
+// before it, once the PIC's application answers. Without them (not staged,
+// or gone since), the manifest again once the network is up, every 30 s
+// until it comes, RESUME_TRIES times at most.
+#define RESUME_WAIT_MS 30000U
+#define RESUME_TRIES   5U
 
 static void resume_service(bool network_up)
 {
     ManifestEntry entry;
-    uint32_t version;
+    PicStoredFile spl_file;
+    PicStoredFile app_file;
+    bool have_spl;
+    bool have_app;
     Stream *output = console_stream();
 
     if (!resume_read)
     {
         resume_read = true;
-        resuming = resume_take();
+        resuming = resume_take(&resume_record);
         resume_ms = millis();
         if (resuming)
         {
-            console_printf("Update: the PIC's updates follow, once it and the network are up\n");
+            console_printf("Update: the PIC's updates follow, once the PIC answers\n");
         }
     }
-    if (!resuming || !network_up || pic_boot_updating() || millis() - resume_ms < RESUME_WAIT_MS ||
-        !pic_running_version(&version))
+    if (!resuming || pic_boot_updating() || pic_link_in_spl() ||
+        !pic_link_get(SML_CLASS_STAT, SML_STAT_SYS, NULL, PIC_LINK_STATE_TIMEOUT_MS))
+    {
+        return;
+    }
+    have_spl = (resume_record.parts & RESUME_SPL) != 0U &&
+               pic_store_find(PIC_FILE_SPL, resume_record.spl_version, resume_record.spl_sha256,
+                              &spl_file);
+    have_app = (resume_record.parts & RESUME_APP) != 0U &&
+               pic_store_find(PIC_FILE_APP, resume_record.app_version, resume_record.app_sha256,
+                              &app_file);
+    if (have_spl || have_app)
+    {
+        resuming = false;
+        console_printf("Update: continuing with the PIC, from the staged files\n");
+        pic_updates_from(have_spl ? &spl_file : NULL, have_app ? &app_file : NULL, output);
+        return;
+    }
+    if (!network_up || millis() - resume_ms < RESUME_WAIT_MS)
     {
         return;
     }
     resume_ms = millis();
     resume_tries++;
-    console_printf("Update: continuing with the PIC\n");
+    console_printf("Update: continuing with the PIC, from the update server\n");
     if (!start(output, &entry))
     {
         if (resume_tries >= RESUME_TRIES)
@@ -1159,15 +1315,10 @@ static void resume_service(bool network_up)
         return;
     }
     resuming = false;
+    check_and_stage(&entry, output);
     if (pic_wanted(&entry))
     {
         pic_updates(&entry, output);
-    }
-    else
-    {
-        print_offers(output, &entry);
-        stage_offered(&entry, output);
-        stage_offered_spl(&entry, output);
     }
 }
 
@@ -1208,15 +1359,8 @@ void updater_service(bool have_local, uint32_t local_seconds)
     {
         return;
     }
-    if (esp_due(&entry, false))
-    {
-        install_esp_reported(output, &entry, true, true);
-    }
-    else
-    {
-        pic_updates(&entry, output);
-        stage_offered_spl(&entry, output);
-    }
+    check_and_stage(&entry, output);
+    install_due(&entry, output);
 }
 
 

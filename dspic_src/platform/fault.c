@@ -108,8 +108,10 @@ void fault_init(uint16_t reset_cause)
         }
         else
         {
-            // After the application's own reset: in the bootloader.
+            // After the application's own reset: in the bootloader. The
+            // uptime is the application's from before it, not the SPL's.
             strcpy(last.task, "SPL");
+            last.uptime_s = 0;
         }
     }
 
