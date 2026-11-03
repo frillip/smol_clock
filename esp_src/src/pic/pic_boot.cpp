@@ -295,6 +295,13 @@ static void report(void)
 
     if (update.step != shown)
     {
+        // The pass through the chunks finished: its 100%.
+        if ((shown == PIC_UPDATE_DATA && update.step == PIC_UPDATE_VERIFY) ||
+            (shown == PIC_UPDATE_VERIFY && update.step == PIC_UPDATE_COMMIT))
+        {
+            console_printf("PIC update: %s 100%%\n",
+                           shown == PIC_UPDATE_DATA ? "written" : "read back");
+        }
         shown = update.step;
         quarter = 0;
         switch (update.step)
@@ -394,6 +401,13 @@ static void spl_report(void)
 
     if (spl.step != spl_shown)
     {
+        // The pass through the chunks finished: its 100%.
+        if ((spl_shown == SPL_UPDATE_DATA && spl.step == SPL_UPDATE_VERIFY) ||
+            (spl_shown == SPL_UPDATE_VERIFY && spl.step == SPL_UPDATE_COMMIT))
+        {
+            console_printf("SPL update: %s 100%%\n",
+                           spl_shown == SPL_UPDATE_DATA ? "written" : "read back");
+        }
         spl_shown = spl.step;
         spl_quarter = 0;
         switch (spl.step)

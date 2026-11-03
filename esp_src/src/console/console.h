@@ -33,5 +33,7 @@ void console_line_clear(ConsoleLine *line);
 // To the serial console and any telnet client.
 void console_write_text(const uint8_t *text, size_t length);
 void console_printf(const char *format, ...) __attribute__((format(printf, 1, 2)));
+// The same as a Stream, for code that reports to one (writes only).
+Stream *console_stream(void);
 
 #endif // CONSOLE_H

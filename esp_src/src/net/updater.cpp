@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <Update.h>
+#include <Preferences.h>
 #include <WiFi.h>
 #include <string.h>
 
@@ -44,6 +45,47 @@ enum
 typedef bool (*Sink)(void *context, const uint8_t *data, size_t length);
 
 static Stream *progress_output;
+// The PIC's updates to follow an ESP update's restart ("update install", the
+// daily check): a flag in NVS, kept over the restart into the new image (and
+// a power cut), cleared as it is read.
+#define RESUME_NAMESPACE "updater"
+#define RESUME_KEY       "resume"
+
+static void resume_mark(bool on)
+{
+    Preferences store;
+
+    store.begin(RESUME_NAMESPACE, false);
+    if (on)
+    {
+        store.putUChar(RESUME_KEY, 1);
+    }
+    else if (store.isKey(RESUME_KEY))
+    {
+        store.remove(RESUME_KEY);
+    }
+    store.end();
+}
+
+
+static bool resume_take(void)
+{
+    Preferences store;
+    bool on;
+
+    store.begin(RESUME_NAMESPACE, false);
+    on = store.getUChar(RESUME_KEY, 0) != 0;
+    if (on)
+    {
+        store.remove(RESUME_KEY);
+    }
+    store.end();
+    return on;
+}
+static bool resume_read;
+static bool resuming; // after the restart, until the PIC's updates start
+static uint8_t resume_tries;
+static uint32_t resume_ms;
 static bool available;
 static bool pic_available;
 static bool running;
@@ -674,12 +716,24 @@ static void pic_updates(const ManifestEntry *entry, Stream *output)
 }
 
 
+// Something for the PIC to do: its SPL offered and not known current, or
+// its application due.
+static bool pic_wanted(const ManifestEntry *entry)
+{
+    uint32_t running_version;
+    SplDue due = spl_due(entry, false, &running_version);
+
+    return due == SPL_DUE || due == SPL_NOT_KNOWN ||
+           pic_due(entry, false, &running_version) == PIC_DUE;
+}
+
+
 // Often: the application's update once the SPL's has ended.
 static void chain_service(void)
 {
     bool done = false;
     uint32_t running_version;
-    Stream *output = &Serial;
+    Stream *output = console_stream();
 
     if (!app_after_spl || pic_boot_updating())
     {
@@ -925,16 +979,30 @@ bool updater_check(Stream *output)
 }
 
 
-static void install_esp_reported(Stream *output, const ManifestEntry *entry, bool restart)
+// restart: at once once installed. then_pic: the PIC's updates follow the
+// restart (updater_poll()).
+static void install_esp_reported(Stream *output, const ManifestEntry *entry, bool restart,
+                                 bool then_pic)
 {
     int result;
 
-    output->printf("ESP: installing %s%s\n", entry->esp.version, restart ? ", then restarting" : "");
+    output->printf("ESP: installing %s%s\n", entry->esp.version,
+                   !restart  ? ""
+                   : then_pic ? ", then restarting; the PIC's updates follow"
+                              : ", then restarting");
+    if (restart && then_pic)
+    {
+        resume_mark(true);
+    }
     running = true;
     progress_output = output;
     result = install_esp(entry, restart);
     progress_output = NULL;
     running = false;
+    if (restart && then_pic)
+    {
+        resume_mark(false); // not restarted: nothing to resume
+    }
     print_result(output, "ESP update", result);
     if (result == RESULT_UPDATE_OK)
     {
@@ -947,20 +1015,23 @@ static void install_esp_reported(Stream *output, const ManifestEntry *entry, boo
 void updater_pull(Stream *output)
 {
     ManifestEntry entry;
-    uint32_t running_version;
 
     print_version(output);
+    if (pic_boot_updating() || app_after_spl || resuming)
+    {
+        output->printf("Update: the PIC's updates are under way\n");
+        return;
+    }
     if (!start(output, &entry))
     {
         return;
     }
     if (esp_due(&entry, false))
     {
-        install_esp_reported(output, &entry, false);
+        install_esp_reported(output, &entry, true, true);
         return;
     }
-    if (spl_due(&entry, false, &running_version) == SPL_DUE ||
-        pic_due(&entry, false, &running_version) == PIC_DUE)
+    if (pic_wanted(&entry))
     {
         pic_updates(&entry, output);
         return;
@@ -991,7 +1062,7 @@ void updater_esp(Stream *output, bool force)
                        entry.esp.version);
         return;
     }
-    install_esp_reported(output, &entry, force);
+    install_esp_reported(output, &entry, force, false);
 }
 
 
@@ -1047,14 +1118,74 @@ void updater_pic(Stream *output, bool force)
 }
 
 
+// After an ESP update's restart: the PIC's updates, once the network is up
+// and the PIC heard from. The manifest is fetched again, every 30 s until it
+// comes, RESUME_TRIES times at most.
+#define RESUME_WAIT_MS  30000U
+#define RESUME_TRIES    5U
+
+
+static void resume_service(bool network_up)
+{
+    ManifestEntry entry;
+    uint32_t version;
+    Stream *output = console_stream();
+
+    if (!resume_read)
+    {
+        resume_read = true;
+        resuming = resume_take();
+        resume_ms = millis();
+        if (resuming)
+        {
+            console_printf("Update: the PIC's updates follow, once it and the network are up\n");
+        }
+    }
+    if (!resuming || !network_up || pic_boot_updating() || millis() - resume_ms < RESUME_WAIT_MS ||
+        !pic_running_version(&version))
+    {
+        return;
+    }
+    resume_ms = millis();
+    resume_tries++;
+    console_printf("Update: continuing with the PIC\n");
+    if (!start(output, &entry))
+    {
+        if (resume_tries >= RESUME_TRIES)
+        {
+            resuming = false;
+            console_printf("Update: the PIC's updates given up: \"update install\" to try again\n");
+        }
+        return;
+    }
+    resuming = false;
+    if (pic_wanted(&entry))
+    {
+        pic_updates(&entry, output);
+    }
+    else
+    {
+        print_offers(output, &entry);
+        stage_offered(&entry, output);
+        stage_offered_spl(&entry, output);
+    }
+}
+
+
+void updater_poll(bool network_up)
+{
+    resume_service(network_up);
+    chain_service();
+}
+
+
 void updater_service(bool have_local, uint32_t local_seconds)
 {
     uint32_t day = local_seconds / 86400;
     uint32_t hour = local_seconds / 3600 % 24;
     ManifestEntry entry;
-    Stream *output = &Serial;
+    Stream *output = console_stream();
 
-    chain_service();
     if (!have_local)
     {
         return;
@@ -1066,7 +1197,8 @@ void updater_service(bool have_local, uint32_t local_seconds)
         checked_day = hour == user_prefs.fields.updater.flags.auto_time ? day : day - 1;
     }
     if (!user_prefs.fields.updater.flags.auto_enabled || checked_day == day ||
-        hour != user_prefs.fields.updater.flags.auto_time || pic_boot_updating() || app_after_spl)
+        hour != user_prefs.fields.updater.flags.auto_time || pic_boot_updating() || app_after_spl ||
+        resuming)
     {
         return;
     }
@@ -1078,7 +1210,7 @@ void updater_service(bool have_local, uint32_t local_seconds)
     }
     if (esp_due(&entry, false))
     {
-        install_esp_reported(output, &entry, true);
+        install_esp_reported(output, &entry, true, true);
     }
     else
     {
@@ -1102,5 +1234,5 @@ bool updater_pic_is_available(void)
 
 bool updater_is_running(void)
 {
-    return running || pic_boot_updating() || app_after_spl;
+    return running || pic_boot_updating() || app_after_spl || resuming;
 }

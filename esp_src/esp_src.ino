@@ -98,6 +98,7 @@ void loop()
     tzinfo_service(network_up);
     leap_service();
     net_status_service();
+    updater_poll(network_up);
 
     if (console_read_line(&serial_line, &Serial, true))
     {

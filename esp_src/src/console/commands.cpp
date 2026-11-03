@@ -1419,7 +1419,7 @@ static void update_auto(Stream *output, const Entry *entry, const Value *value)
 static const Entry update_entries[] = {
     {"check", VALUE_NONE, NULL, 0, 0, "", "What is offered; stages the PIC's files",
      update_action},
-    {"install", VALUE_NONE, NULL, 0, 0, "", "The next due: ESP (esp reset), else SPL then PIC", update_action},
+    {"install", VALUE_NONE, NULL, 0, 0, "", "Everything due: ESP (restarts), SPL, PIC", update_action},
     {"esp", VALUE_OPTION, "force", 0, 0, "[force]",
      "The ESP if newer (esp reset); force: any version, restarts", update_part},
     {"pic", VALUE_OPTION, "force", 0, 0, "[force]",

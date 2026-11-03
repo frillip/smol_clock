@@ -71,6 +71,37 @@ void console_write_text(const uint8_t *text, size_t length)
 }
 
 
+namespace
+{
+class ConsoleStream : public Stream
+{
+  public:
+    size_t write(uint8_t byte) override
+    {
+        console_write_text(&byte, 1);
+        return 1;
+    }
+    size_t write(const uint8_t *buffer, size_t size) override
+    {
+        console_write_text(buffer, size);
+        return size;
+    }
+    int available() override { return 0; }
+    int read() override { return -1; }
+    int peek() override { return -1; }
+    void flush() override {}
+};
+
+ConsoleStream console_out;
+} // namespace
+
+
+Stream *console_stream(void)
+{
+    return &console_out;
+}
+
+
 void console_printf(const char *format, ...)
 {
     char text[256];
