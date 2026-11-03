@@ -4,17 +4,25 @@
 #include <HTTPClient.h>
 #include <Update.h>
 #include <WiFi.h>
-#include <ctype.h>
 #include <string.h>
 
 #include "../console/console.h"
+#include "../pic/pic_boot.h"
+#include "../pic/pic_link.h"
+#include "../pic/pic_report.h"
+#include "../pic/pic_store.h"
 #include "../settings/user_prefs.h"
 #include "../version.h"
+#include "manifest.h"
 #include "net_connect.h"
 #include "root_ca.h"
 
-// What a check or an update came to: ESP32-OTA-Pull's codes, which this
-// replaces, so they read the same; above 0, the HTTP status.
+extern "C"
+{
+#include "../pic/sml/sml.h"
+}
+
+// What a check or an update came to; above 0, the HTTP status.
 enum
 {
     RESULT_UPDATE_AVAILABLE = -3,
@@ -25,28 +33,24 @@ enum
     RESULT_WRITE_ERROR = 2,
     RESULT_JSON_PROBLEM = 3,
     RESULT_OTA_FAILED = 4,
+    RESULT_SIZE = 5,   // not the size the manifest gives
+    RESULT_SHA256 = 6, // not the file the manifest names
 };
 
-typedef enum
-{
-    ACTION_CHECK = 0,   // say whether there is one
-    ACTION_INSTALL,     // install it, restart later
-    ACTION_INSTALL_BOOT // install it and restart
-} Action;
-
 #define HTTP_TIMEOUT_MS       15000U
-#define MANIFEST_MAX_BYTES    (16 * 1024)
 #define DOWNLOAD_IDLE_MS      30000U
 #define DOWNLOAD_BUFFER_BYTES 1024U
 
+typedef bool (*Sink)(void *context, const uint8_t *data, size_t length);
+
 static Stream *progress_output;
 static bool available;
+static bool pic_available;
 static bool running;
 static bool day_known;
 static uint32_t checked_day; // local day number of the last automatic check
-static String offered_version;
 static char last_address[48]; // the server the latest request connected to
-static char last_failure[48]; // why it failed, if it did (RESULT_HTTP_FAILED)
+static char last_failure[64]; // why it failed, if it did
 
 static String url(void)
 {
@@ -54,10 +58,12 @@ static String url(void)
            user_prefs.fields.updater.path;
 }
 
+
 void updater_set_server(const char *server)
 {
     user_prefs_set_string(user_prefs.fields.updater.server, server);
 }
+
 
 void updater_set_path(const char *path)
 {
@@ -70,11 +76,13 @@ void updater_set_path(const char *path)
     user_prefs_set_string(user_prefs.fields.updater.path, value.c_str());
 }
 
+
 void updater_set_config(const char *config)
 {
     user_prefs_set_string(user_prefs.fields.updater.config,
                           strcmp(config, "default") == 0 ? UPDATER_CONFIG_DEFAULT : config);
 }
+
 
 static void print_version(Stream *output)
 {
@@ -86,112 +94,42 @@ static void print_version(Stream *output)
     output->printf("\n");
 }
 
-static void on_progress(int offset, int total)
-{
-    static int previous = -1;
-    int percent = total > 0 ? (int)(100LL * offset / total) : 0;
-
-    if (percent != previous && progress_output != NULL)
-    {
-        progress_output->printf("Updating: %d of %d bytes (%d%%)\n", offset, total, percent);
-        previous = percent;
-    }
-}
 
 static const char *result_name(int code)
 {
     switch (code)
     {
-        case RESULT_UPDATE_AVAILABLE: return "update available, not installed";
-        case RESULT_NO_PROFILE: return "no profile matches";
-        case RESULT_NO_UPDATE: return "no update for this version";
-        case RESULT_UPDATE_OK: return "update installed, restart to use it";
-        case RESULT_HTTP_FAILED: return "HTTP request failed";
-        case RESULT_WRITE_ERROR: return "write error";
-        case RESULT_JSON_PROBLEM: return "invalid JSON";
-        case RESULT_OTA_FAILED: return "update failed (no OTA partition?)";
-        default: return code > 0 ? "unexpected HTTP status" : "unknown error";
+    case RESULT_UPDATE_AVAILABLE: return "update available, not installed";
+    case RESULT_NO_PROFILE: return "no configuration for this clock";
+    case RESULT_NO_UPDATE: return "no update for this version";
+    case RESULT_UPDATE_OK: return "update installed, restart to use it";
+    case RESULT_HTTP_FAILED: return "HTTP request failed";
+    case RESULT_WRITE_ERROR: return "write error";
+    case RESULT_JSON_PROBLEM: return "invalid manifest";
+    case RESULT_OTA_FAILED: return "update failed (no OTA partition?)";
+    case RESULT_SIZE: return "not the size the manifest gives";
+    case RESULT_SHA256: return "SHA-256 wrong: not the file the manifest names";
+    default: return code > 0 ? "unexpected HTTP status" : "unknown error";
     }
 }
 
 
-// ---- Versions: dot-separated numbers, 1.10.0 above 1.9.0 ----------------
-
-static bool numeric_version(const char *version)
+static void print_result(Stream *output, const char *what, int result)
 {
-    bool expecting_digit = true;
-    const char *p;
-
-    if (version == NULL || *version == '\0')
+    output->printf("%s: %d (%s", what, result, result_name(result));
+    if ((result == RESULT_HTTP_FAILED || result == RESULT_JSON_PROBLEM ||
+         result == RESULT_WRITE_ERROR) &&
+        last_failure[0] != '\0')
     {
-        return false;
+        output->printf(": %s", last_failure);
     }
-    for (p = version; *p != '\0'; p++)
+    output->printf(")");
+    if (last_address[0] != '\0')
     {
-        if (*p == '.')
-        {
-            if (expecting_digit)
-            {
-                return false;
-            }
-            expecting_digit = true;
-        }
-        else if (isdigit((unsigned char)*p))
-        {
-            expecting_digit = false;
-        }
-        else
-        {
-            return false;
-        }
+        output->printf(", %s", last_address);
     }
-    return !expecting_digit;
+    output->printf("\n");
 }
-
-
-// a against b: 1, 0 or -1. False unless both are numeric versions.
-static bool compare_versions(const char *a, const char *b, int *result)
-{
-    if (!numeric_version(a) || !numeric_version(b))
-    {
-        return false;
-    }
-    while (*a != '\0' || *b != '\0')
-    {
-        const char *a_end = a + strcspn(a, ".");
-        const char *b_end = b + strcspn(b, ".");
-        size_t a_length;
-        size_t b_length;
-        int order;
-
-        while (a < a_end && *a == '0')
-        {
-            a++;
-        }
-        while (b < b_end && *b == '0')
-        {
-            b++;
-        }
-        a_length = (size_t)(a_end - a);
-        b_length = (size_t)(b_end - b);
-        if (a_length != b_length)
-        {
-            *result = a_length > b_length ? 1 : -1;
-            return true;
-        }
-        order = strncmp(a, b, a_length);
-        if (order != 0)
-        {
-            *result = order > 0 ? 1 : -1;
-            return true;
-        }
-        a = *a_end == '.' ? a_end + 1 : a_end;
-        b = *b_end == '.' ? b_end + 1 : b_end;
-    }
-    *result = 0;
-    return true;
-}
-
 
 // ---- Requests --------------------------------------------------------------
 
@@ -200,11 +138,10 @@ static bool compare_versions(const char *a, const char *b, int *result)
 static int get(HTTPClient &http, NetworkClientSecure &secure, NetworkClient &plain, const char *url)
 {
     IPAddress address;
+    int status;
 
     http.setConnectTimeout(HTTP_TIMEOUT_MS);
     http.setTimeout(HTTP_TIMEOUT_MS);
-    int status;
-
     if (!net_http_connect(secure, plain, url, root_ca_pem, HTTP_TIMEOUT_MS, &address))
     {
         snprintf(last_failure, sizeof(last_failure), "no connection");
@@ -226,49 +163,49 @@ static int get(HTTPClient &http, NetworkClientSecure &secure, NetworkClient &pla
 }
 
 
-// Downloads the image at url and writes it to the other OTA partition.
-static int install(const char *url, Action action)
+/* The file a component names, to sink, as it arrives: its size checked
+ * against the manifest's before anything is written, its SHA-256 after.
+ * A sink's false stops it (RESULT_WRITE_ERROR). The caller discards what
+ * the sink took on any result but RESULT_UPDATE_OK. */
+static int download(const ManifestComponent *component, Sink sink, void *context)
 {
     NetworkClientSecure secure;
     NetworkClient plain;
     HTTPClient http;
     NetworkClient *stream;
     uint8_t buffer[DOWNLOAD_BUFFER_BYTES];
-    int total;
-    int offset = 0;
-    int status = get(http, secure, plain, url);
+    uint8_t digest[SHA256_BYTES];
+    Sha256 sha;
+    uint32_t total = component->size;
+    uint32_t offset = 0;
     uint32_t last_progress_ms;
+    int previous_percent = -1;
+    int status = get(http, secure, plain, component->url);
 
     if (status != HTTP_CODE_OK)
     {
         http.end();
         return status > 0 ? status : RESULT_HTTP_FAILED;
     }
-    total = http.getSize();
-    if (total <= 0)
+    if (http.getSize() != (int)total)
     {
         http.end();
-        snprintf(last_failure, sizeof(last_failure), "no Content-Length");
-        return RESULT_HTTP_FAILED;
-    }
-    if (!Update.begin((size_t)total))
-    {
-        http.end();
-        return RESULT_OTA_FAILED;
+        return RESULT_SIZE;
     }
     stream = http.getStreamPtr();
     if (stream == NULL)
     {
-        Update.abort();
         http.end();
         return RESULT_WRITE_ERROR;
     }
+    sha256_start(&sha);
     last_progress_ms = millis();
     while (offset < total)
     {
         size_t waiting;
         size_t wanted;
         size_t got;
+        int percent;
 
         if (!http.connected() && stream->available() == 0)
         {
@@ -285,44 +222,45 @@ static int install(const char *url, Action action)
             continue;
         }
         wanted = waiting < sizeof(buffer) ? waiting : sizeof(buffer);
-        if (wanted > (size_t)(total - offset))
+        if (wanted > total - offset)
         {
-            wanted = (size_t)(total - offset);
+            wanted = total - offset;
         }
         got = stream->readBytes(buffer, wanted);
-        if (got == 0 || Update.write(buffer, got) != got)
+        if (got == 0)
         {
             break;
         }
-        offset += (int)got;
+        sha256_update(&sha, buffer, got);
+        if (!sink(context, buffer, got))
+        {
+            http.end();
+            return RESULT_WRITE_ERROR;
+        }
+        offset += (uint32_t)got;
         last_progress_ms = millis();
-        on_progress(offset, total);
+        percent = (int)(100ULL * offset / total);
+        if (progress_output != NULL && percent / 10 != previous_percent / 10)
+        {
+            progress_output->printf("Downloading: %lu of %lu bytes (%d%%)\n",
+                                    (unsigned long)offset, (unsigned long)total, percent);
+            previous_percent = percent;
+        }
     }
     http.end();
     if (offset != total)
     {
-        Update.abort();
+        snprintf(last_failure, sizeof(last_failure), "%lu of %lu bytes", (unsigned long)offset,
+                 (unsigned long)total);
         return RESULT_WRITE_ERROR;
     }
-    if (!Update.end())
-    {
-        Update.abort();
-        return RESULT_OTA_FAILED;
-    }
-    if (action == ACTION_INSTALL_BOOT)
-    {
-        delay(1000);
-        ESP.restart();
-    }
-    return RESULT_UPDATE_OK;
+    sha256_finish(&sha, digest);
+    return memcmp(digest, component->sha256, SHA256_BYTES) == 0 ? RESULT_UPDATE_OK : RESULT_SHA256;
 }
 
 
-/* The manifest at url: {"Configurations": [{"Board", "Device", "Config",
- * "Version", "URL"}, ...]}, as ESP32-OTA-Pull reads it. The first profile
- * for this board, device and config with a later version (or, with
- * any_version, any other) is the update. */
-static int check_manifest(Action action, bool any_version)
+// The manifest's configuration for this clock.
+static int fetch(ManifestEntry *entry)
 {
     NetworkClientSecure secure;
     NetworkClient plain;
@@ -330,13 +268,9 @@ static int check_manifest(Action action, bool any_version)
     JsonDocument doc;
     DeserializationError error;
     String manifest_url = url();
-    const char *current = any_version ? "0.0.0" : ESP_VERSION;
-    String board = ARDUINO_BOARD;
-    String device = WiFi.macAddress();
-    String config = user_prefs.fields.updater.config;
-    bool found_profile = false;
     int status = get(http, secure, plain, manifest_url.c_str());
     int length;
+    ManifestResult result;
 
     if (status != HTTP_CODE_OK)
     {
@@ -347,126 +281,492 @@ static int check_manifest(Action action, bool any_version)
     if (length <= 0 || length > MANIFEST_MAX_BYTES)
     {
         http.end();
+        snprintf(last_failure, sizeof(last_failure), "%d bytes", length);
         return RESULT_JSON_PROBLEM;
     }
     error = deserializeJson(doc, http.getStream());
     http.end();
-    if (error || !doc.is<JsonObject>() || !doc["Configurations"].is<JsonArray>())
+    if (error)
+    {
+        snprintf(last_failure, sizeof(last_failure), "%s", error.c_str());
+        return RESULT_JSON_PROBLEM;
+    }
+    result = manifest_select(doc, UPDATER_HARDWARE, user_prefs.fields.updater.config,
+                             WiFi.macAddress().c_str(), entry, last_failure, sizeof(last_failure));
+    if (result == MANIFEST_INVALID)
     {
         return RESULT_JSON_PROBLEM;
     }
-    JsonArray profiles = doc["Configurations"].as<JsonArray>();
-    if (profiles.size() == 0)
-    {
-        return RESULT_NO_PROFILE;
-    }
-    // Every profile checked before any is used.
-    for (JsonObject profile : profiles)
-    {
-        const char *image;
+    return result == MANIFEST_NO_ENTRY ? RESULT_NO_PROFILE : RESULT_UPDATE_OK;
+}
 
-        if (profile.isNull() || !profile["URL"].is<const char *>() ||
-            !profile["Version"].is<const char *>() ||
-            (!profile["Board"].isNull() && !profile["Board"].is<const char *>()) ||
-            (!profile["Device"].isNull() && !profile["Device"].is<const char *>()) ||
-            (!profile["Config"].isNull() && !profile["Config"].is<const char *>()))
-        {
-            return RESULT_JSON_PROBLEM;
-        }
-        image = profile["URL"].as<const char *>();
-        if (image[0] == '\0' || !numeric_version(profile["Version"].as<const char *>()) ||
-            (strncmp(image, "http://", 7) != 0 && strncmp(image, "https://", 8) != 0))
-        {
-            return RESULT_JSON_PROBLEM;
-        }
-    }
-    for (JsonObject profile : profiles)
-    {
-        String p_board = profile["Board"].isNull() ? "" : profile["Board"].as<const char *>();
-        String p_device = profile["Device"].isNull() ? "" : profile["Device"].as<const char *>();
-        String p_config = profile["Config"].isNull() ? "" : profile["Config"].as<const char *>();
-        const char *version = profile["Version"].as<const char *>();
-        int order = 0;
+// ---- What is due ------------------------------------------------------------
 
-        if ((!p_board.isEmpty() && p_board != board) ||
-            (!p_device.isEmpty() && p_device != device) ||
-            (!p_config.isEmpty() && p_config != config))
-        {
-            continue;
-        }
-        if (!compare_versions(version, current, &order))
-        {
-            return RESULT_JSON_PROBLEM;
-        }
-        if (order > 0 || (any_version && order != 0))
-        {
-            offered_version = version;
-            return action == ACTION_CHECK ? RESULT_UPDATE_AVAILABLE
-                                          : install(profile["URL"].as<const char *>(), action);
-        }
-        found_profile = true;
-    }
-    return found_profile ? RESULT_NO_UPDATE : RESULT_NO_PROFILE;
+// The ESP's image offered is newer (or, with any_version, different).
+static bool esp_due(const ManifestEntry *entry, bool any_version)
+{
+    int order = 0;
+
+    return entry->esp.present && manifest_compare_versions(entry->esp.version, ESP_VERSION, &order) &&
+           (order > 0 || (any_version && order != 0));
 }
 
 
-// One request; prints the outcome.
-static int request(Stream *output, Action action, bool any_version)
+// The PIC's application as the PIC reports it: STAT-SYS from the running
+// application, or BOOT-STATUS from the SPL (0: none there). False if the
+// PIC has not been heard from.
+// The PIC as heard just before the manifest's request (note_pic): a TLS
+// request holds up loop() for seconds, by which time the PIC's latest
+// STAT-SYS is too old for pic_link_get().
+static bool pic_heard;
+static uint32_t pic_version_heard; // 0: in its SPL without a valid application
+
+static bool pic_running_version(uint32_t *version)
+{
+    SML_STAT_SYS_PAYLOAD sys;
+    SML_BOOT_STATUS_PAYLOAD status;
+
+    if (pic_link_in_spl() &&
+        pic_link_get(SML_CLASS_BOOT, SML_BOOT_STATUS, &status, PIC_LINK_STATE_TIMEOUT_MS))
+    {
+        *version = (status.flags & SML_BOOT_FLAG_IMAGE_OK) != 0U ? status.app_version : 0U;
+        return true;
+    }
+    if (!pic_link_in_spl() &&
+        pic_link_get(SML_CLASS_STAT, SML_STAT_SYS, &sys, PIC_LINK_STATE_TIMEOUT_MS))
+    {
+        *version = sys.pic_version;
+        return true;
+    }
+    return false;
+}
+
+
+static void note_pic(void)
+{
+    pic_heard = pic_running_version(&pic_version_heard);
+    if (!pic_heard)
+    {
+        pic_version_heard = 0;
+    }
+}
+
+
+typedef enum
+{
+    PIC_NOT_OFFERED,
+    PIC_NOT_HEARD, // the PIC's version is not known
+    PIC_CURRENT,
+    PIC_WAITS_FOR_ESP, // newer, but the ESP's update comes first
+    PIC_DUE,
+} PicDue;
+
+static PicDue pic_due(const ManifestEntry *entry, bool force, uint32_t *running)
+{
+    uint32_t offered;
+    int order = 0;
+
+    *running = 0;
+    if (!entry->pic.present || !pic_file_version(entry->pic.version, &offered))
+    {
+        return PIC_NOT_OFFERED;
+    }
+    if (!pic_heard)
+    {
+        return force ? PIC_DUE : PIC_NOT_HEARD;
+    }
+    *running = pic_version_heard;
+    if (!force && offered <= *running)
+    {
+        return PIC_CURRENT;
+    }
+    if (entry->esp.present && manifest_compare_versions(entry->esp.version, ESP_VERSION, &order) &&
+        order > 0)
+    {
+        return PIC_WAITS_FOR_ESP;
+    }
+    return PIC_DUE;
+}
+
+// ---- Installing ----------------------------------------------------------------
+
+static bool esp_sink(void *context, const uint8_t *data, size_t length)
+{
+    (void)context;
+    return Update.write((uint8_t *)data, length) == length;
+}
+
+
+// The ESP's image into the other OTA slot; restart if asked.
+static int install_esp(const ManifestEntry *entry, bool restart)
 {
     int result;
 
-    running = action != ACTION_CHECK;
+    if (!Update.begin(entry->esp.size))
+    {
+        return RESULT_OTA_FAILED;
+    }
+    result = download(&entry->esp, esp_sink, NULL);
+    if (result != RESULT_UPDATE_OK)
+    {
+        Update.abort();
+        return result;
+    }
+    if (!Update.end())
+    {
+        Update.abort();
+        return RESULT_OTA_FAILED;
+    }
+    if (restart)
+    {
+        delay(1000);
+        ESP.restart();
+    }
+    return RESULT_UPDATE_OK;
+}
+
+
+static bool pic_sink(void *context, const uint8_t *data, size_t length)
+{
+    PicStoreWriter *writer = (PicStoreWriter *)context;
+
+    return pic_store_write(writer, data, (uint32_t)length) == PIC_STORE_OK;
+}
+
+
+// The manifest's PIC application downloaded into a slot, checked. what
+// prefixes what is printed. False, said why, if it failed.
+static bool stage_pic(const ManifestEntry *entry, uint8_t slot, PicStoredFile *file,
+                      const char *what, Stream *output)
+{
+    static PicStoreWriter writer; // big: not on the stack
+    PicStoreResult stored;
+    int result;
+
+    stored = pic_store_begin(&writer, PIC_FILE_APP, slot, entry->pic.size);
+    if (stored != PIC_STORE_OK)
+    {
+        output->printf("%s: staging: %s\n", what, pic_store_result_name(stored));
+        return false;
+    }
     progress_output = output;
+    result = download(&entry->pic, pic_sink, &writer);
+    progress_output = NULL;
+    if (result != RESULT_UPDATE_OK)
+    {
+        char text[48];
+
+        snprintf(text, sizeof(text), "%s: download", what);
+        print_result(output, text, result);
+        return false;
+    }
+    stored = pic_store_finish(&writer, entry->pic.sha256, file);
+    if (stored != PIC_STORE_OK)
+    {
+        output->printf("%s: staging: %s\n", what, pic_store_result_name(stored));
+        return false;
+    }
+    return true;
+}
+
+
+// A staged file the PIC can take: the SML major this ESP speaks.
+static bool pic_compatible(const PicStoredFile *file, Stream *output)
+{
+    if (file->header.sml_version >> 8 != SML_PROTOCOL_MAJOR)
+    {
+        output->printf("PIC update: the application speaks SML %u, this ESP %u\n",
+                       file->header.sml_version >> 8, (unsigned)SML_PROTOCOL_MAJOR);
+        return false;
+    }
+    return true;
+}
+
+
+// The PIC's application into picfw, unless a slot holds it already; then
+// its install from there, run by pic_boot. False, said why, if not started.
+static bool install_pic(const ManifestEntry *entry, uint32_t running, bool force, Stream *output)
+{
+    PicStoredFile file;
+    uint32_t offered = 0;
+
+    (void)pic_file_version(entry->pic.version, &offered);
+    if (!pic_store_present())
+    {
+        output->printf("PIC update: no picfw partition: reflash the ESP over USB\n");
+        return false;
+    }
+    if (pic_boot_updating())
+    {
+        output->printf("PIC update: one is running already\n");
+        return false;
+    }
+    if (pic_store_find(PIC_FILE_APP, offered, entry->pic.sha256, &file))
+    {
+        output->printf("PIC update: %s already staged in slot %u\n", entry->pic.version,
+                       file.slot);
+    }
+    else
+    {
+        uint8_t slot = pic_store_choose(PIC_FILE_APP, running);
+
+        output->printf("PIC update: downloading %s into slot %u\n", entry->pic.version, slot);
+        if (!stage_pic(entry, slot, &file, "PIC update", output))
+        {
+            return false;
+        }
+    }
+    if (file.header.version != offered)
+    {
+        output->printf("PIC update: the file holds another version than the manifest says\n");
+        return false;
+    }
+    if (!pic_compatible(&file, output))
+    {
+        return false;
+    }
+    return pic_boot_update(&file, force, output);
+}
+
+
+// The application the PIC runs, into picfw, when the manifest offers that
+// version and no slot holds it: a copy to reinstall without the network
+// (update pic force, offline), and for pic_boot's recovery of a PIC left
+// without an application.
+static void stage_running(const ManifestEntry *entry, Stream *output)
+{
+    PicStoredFile file;
+    uint32_t offered = 0;
+    uint8_t slot;
+    char text[16];
+
+    if (!pic_store_present() || pic_boot_updating() || !pic_heard || pic_version_heard == 0U ||
+        !entry->pic.present || !pic_file_version(entry->pic.version, &offered) ||
+        offered != pic_version_heard ||
+        (pic_store_pick(PIC_FILE_APP, pic_version_heard, &file) &&
+         file.header.version == pic_version_heard))
+    {
+        return;
+    }
+    slot = pic_store_choose(PIC_FILE_APP, pic_version_heard);
+    pic_report_version(text, sizeof(text), pic_version_heard);
+    output->printf("PIC: staging %s, the application it runs, into slot %u\n", text, slot);
+    if (stage_pic(entry, slot, &file, "PIC staging", output))
+    {
+        if (file.header.version != offered)
+        {
+            output->printf("PIC staging: the file holds another version than the manifest says\n");
+            return;
+        }
+        output->printf("PIC: %s staged in slot %u\n", text, slot);
+    }
+}
+
+
+// No manifest: a staged file instead, when forced or when the PIC has no
+// application. The one the PIC runs (or last ran), else the newest.
+static void install_offline(Stream *output, bool force)
+{
+    PicStoredFile file;
+    char text[16];
+    bool no_application = pic_heard && pic_version_heard == 0U;
+
+    if (!pic_store_present() || pic_boot_updating() ||
+        !pic_store_pick(PIC_FILE_APP, pic_heard ? pic_version_heard : 0U, &file))
+    {
+        output->printf("PIC: nothing staged to install without the update server\n");
+        return;
+    }
+    pic_report_version(text, sizeof(text), file.header.version);
+    if (!force && !no_application)
+    {
+        output->printf("PIC: \"update pic force\" installs the staged %s without the update "
+                       "server\n",
+                       text);
+        return;
+    }
+    if (!pic_compatible(&file, output))
+    {
+        return;
+    }
+    output->printf("PIC update: without the update server, the staged %s from slot %u\n", text,
+                   file.slot);
+    (void)pic_boot_update(&file, force, output);
+}
+
+// ---- Commands ------------------------------------------------------------------
+
+static void print_offers(Stream *output, const ManifestEntry *entry)
+{
+    uint32_t running = 0;
+    char text[16];
+
+    if (entry->esp.present)
+    {
+        output->printf("ESP: %s offered, %s\n", entry->esp.version,
+                       esp_due(entry, false) ? "UPDATE AVAILABLE" : "up to date");
+    }
+    else
+    {
+        output->printf("ESP: nothing offered\n");
+    }
+    switch (pic_due(entry, false, &running))
+    {
+    case PIC_NOT_OFFERED: output->printf("PIC: nothing offered\n"); break;
+    case PIC_NOT_HEARD: output->printf("PIC: %s offered, the PIC not heard from\n", entry->pic.version); break;
+    case PIC_CURRENT:
+        pic_report_version(text, sizeof(text), running);
+        output->printf("PIC: %s offered, up to date (%s)\n", entry->pic.version, text);
+        break;
+    case PIC_WAITS_FOR_ESP:
+        output->printf("PIC: %s offered, after the ESP's update\n", entry->pic.version);
+        break;
+    case PIC_DUE:
+        pic_report_version(text, sizeof(text), running);
+        output->printf("PIC: %s offered, UPDATE AVAILABLE (runs %s)\n", entry->pic.version,
+                       running != 0U ? text : "nothing");
+        break;
+    }
+    if (entry->pic_spl.present)
+    {
+        output->printf("PIC SPL: %s offered, not installed: SPL updates are not supported yet\n",
+                       entry->pic_spl.version);
+    }
+}
+
+
+// The manifest; its result printed. True with the entry.
+static bool start(Stream *output, ManifestEntry *entry)
+{
+    int result;
+
     last_address[0] = '\0';
     last_failure[0] = '\0';
-    result = check_manifest(action, any_version);
+    note_pic();
+    running = true;
+    result = fetch(entry);
     running = false;
-    available = result == RESULT_UPDATE_AVAILABLE;
-    output->printf("Update server: %d (%s", result, result_name(result));
-    if (result == RESULT_HTTP_FAILED && last_failure[0] != '\0')
+    if (result != RESULT_UPDATE_OK)
     {
-        output->printf(": %s", last_failure);
+        print_result(output, "Update server", result);
+        return false;
     }
-    output->printf(")");
-    if (last_address[0] != '\0')
-    {
-        output->printf(", %s", last_address);
-    }
-    output->printf("\n");
-    return result;
+    return true;
 }
+
 
 bool updater_check(Stream *output)
 {
+    ManifestEntry entry;
+    uint32_t running_version;
+
     print_version(output);
-    request(output, ACTION_CHECK, false);
-    if (available)
+    if (!start(output, &entry))
     {
-        output->printf("Available: %s\n", offered_version.c_str());
+        return false;
     }
-    return available;
+    available = esp_due(&entry, false);
+    pic_available = pic_due(&entry, false, &running_version) == PIC_DUE;
+    print_offers(output, &entry);
+    stage_running(&entry, output);
+    return available || pic_available;
 }
 
-void updater_pull(Stream *output)
+
+static void install_esp_reported(Stream *output, const ManifestEntry *entry, bool restart)
 {
-    print_version(output);
-    if (request(output, ACTION_INSTALL, false) == RESULT_UPDATE_OK)
+    int result;
+
+    output->printf("ESP: installing %s%s\n", entry->esp.version, restart ? ", then restarting" : "");
+    running = true;
+    progress_output = output;
+    result = install_esp(entry, restart);
+    progress_output = NULL;
+    running = false;
+    print_result(output, "ESP update", result);
+    if (result == RESULT_UPDATE_OK)
     {
+        available = false;
         output->printf("Use \"esp reset\" to finish the update\n");
     }
 }
 
+
+void updater_pull(Stream *output)
+{
+    ManifestEntry entry;
+    uint32_t running_version;
+
+    print_version(output);
+    if (!start(output, &entry))
+    {
+        return;
+    }
+    if (esp_due(&entry, false))
+    {
+        install_esp_reported(output, &entry, false);
+        return;
+    }
+    if (pic_due(&entry, false, &running_version) == PIC_DUE)
+    {
+        (void)install_pic(&entry, running_version, false, output);
+        return;
+    }
+    print_offers(output, &entry);
+    stage_running(&entry, output);
+}
+
+
 void updater_force(Stream *output)
 {
+    ManifestEntry entry;
+
     print_version(output);
-    output->printf("Installing whatever the server offers, then restarting\n");
-    request(output, ACTION_INSTALL_BOOT, true);
+    if (!start(output, &entry))
+    {
+        return;
+    }
+    if (!esp_due(&entry, true))
+    {
+        output->printf("ESP: nothing else offered\n");
+        return;
+    }
+    install_esp_reported(output, &entry, true);
 }
+
+
+void updater_pic(Stream *output, bool force)
+{
+    ManifestEntry entry;
+    uint32_t running_version;
+
+    if (!start(output, &entry))
+    {
+        install_offline(output, force);
+        return;
+    }
+    switch (pic_due(&entry, force, &running_version))
+    {
+    case PIC_DUE: (void)install_pic(&entry, running_version, force, output); break;
+    case PIC_NOT_OFFERED: output->printf("PIC: nothing offered\n"); break;
+    case PIC_NOT_HEARD: output->printf("PIC: not heard from: its version is not known\n"); break;
+    case PIC_CURRENT:
+        output->printf("PIC: up to date (force to install it again)\n");
+        stage_running(&entry, output);
+        break;
+    case PIC_WAITS_FOR_ESP:
+        output->printf("PIC: the ESP's update first (%s)\n", entry.esp.version);
+        break;
+    }
+}
+
 
 void updater_service(bool have_local, uint32_t local_seconds)
 {
     uint32_t day = local_seconds / 86400;
     uint32_t hour = local_seconds / 3600 % 24;
+    ManifestEntry entry;
+    uint32_t running_version;
     Stream *output = &Serial;
 
     if (!have_local)
@@ -480,24 +780,44 @@ void updater_service(bool have_local, uint32_t local_seconds)
         checked_day = hour == user_prefs.fields.updater.flags.auto_time ? day : day - 1;
     }
     if (!user_prefs.fields.updater.flags.auto_enabled || checked_day == day ||
-        hour != user_prefs.fields.updater.flags.auto_time)
+        hour != user_prefs.fields.updater.flags.auto_time || pic_boot_updating())
     {
         return;
     }
     checked_day = day;
     console_printf("Automatic update check\n");
-    if (request(output, ACTION_CHECK, false) == RESULT_UPDATE_AVAILABLE)
+    if (!start(output, &entry))
     {
-        request(output, ACTION_INSTALL_BOOT, false);
+        return;
+    }
+    if (esp_due(&entry, false))
+    {
+        install_esp_reported(output, &entry, true);
+    }
+    else if (pic_due(&entry, false, &running_version) == PIC_DUE)
+    {
+        (void)install_pic(&entry, running_version, false, output);
+    }
+    else
+    {
+        stage_running(&entry, output);
     }
 }
+
 
 bool updater_is_available(void)
 {
     return available;
 }
 
+
+bool updater_pic_is_available(void)
+{
+    return pic_available;
+}
+
+
 bool updater_is_running(void)
 {
-    return running;
+    return running || pic_boot_updating();
 }

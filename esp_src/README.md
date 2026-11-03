@@ -10,7 +10,7 @@ This firmware requires the V2+ dsPIC firmware in [dspic_src](../dspic_src). It n
 
 # Building
 
-The firmware builds with the Arduino IDE 2 or arduino-cli, using the **esp32** core 3.3.x. It has been built and run with 3.3.9 to 3.3.12. Select *ESP32 Dev Module*, 16MB flash and the *Custom* partition scheme, which uses [partitions.csv](partitions.csv).
+The firmware builds with the Arduino IDE 2 or arduino-cli, using the **esp32** core 3.3.x. It has been built and run with 3.3.9 to 3.3.12. Select *ESP32 Dev Module*, 16MB flash and the *Custom* partition scheme, which uses [partitions.csv](partitions.csv). The partition table can only change over USB. A clock with the older table updates its ESP over the air as before, but cannot stage the PIC's files (`PIC updates: OFF, no picfw partition`) until it is flashed once over USB. `nvs`, `otadata` and `app0` stay where they were, because the Arduino upload writes `boot_app0.bin` at 0xE000 and the application at 0x10000 whatever the table says, so the saved settings and Wi-Fi survive the change. What the old table left elsewhere is harmless: a `picfw` slot is only trusted when its CRCs pass.
 
 The libraries are git submodules in [libraries](libraries): WiFiManager, ESPTelnet and ArduinoJson. Run `git submodule update --init`, then point the IDE's sketchbook (or `--libraries` for arduino-cli) at that folder. ezTime is no longer used, and neither is ESP32-OTA-Pull: the updater reads the same manifest itself, so that its requests connect with IPv6/IPv4 fallback (below).
 
@@ -45,7 +45,7 @@ The portable parts of the firmware have host tests: the clock model, NTP packet 
 cd tests/host && make
 ```
 
-The console commands and the PIC link have their own, in `tests/commands`: every command against a PIC played by the test, the settings written whole and their answers, and the value parsers (`cd tests/commands && make`). The dual-stack fallback has its own too, in `tests/net`: the order addresses are tried in, a failed family held back and given back, and URLs (`cd tests/net && make`). So do the NTP servers, in `tests/ntp`: the choice between servers that agree or not, and the NTP service against fake servers that agree, lie, go quiet and change (`cd tests/ntp && make`). And the settings, in `tests/settings`: kept from older firmware, and the NTP servers' defaults (`cd tests/settings && make`).
+The console commands and the PIC link have their own, in `tests/commands`: every command against a PIC played by the test, the settings written whole and their answers, and the value parsers (`cd tests/commands && make`). The dual-stack fallback has its own too, in `tests/net`: the order addresses are tried in, a failed family held back and given back, and URLs (`cd tests/net && make`). So do the NTP servers, in `tests/ntp`: the choice between servers that agree or not, and the NTP service against fake servers that agree, lie, go quiet and change (`cd tests/ntp && make`). And the settings, in `tests/settings`: kept from older firmware, and the NTP servers' defaults (`cd tests/settings && make`). The update manifest's parsing and selection are in `tests/manifest`, which needs the ArduinoJson submodule. The PIC's updates are in `tests/pic_update`: the `picfw` slots against a model of NOR flash, and the whole bootloader exchange against the real SPL core from `dspic_spl`, with frames lost and damaged, PIC resets and power cut at every step.
 
 [tools/format.sh](tools/format.sh) applies the same house style as the dsPIC sources.
 
@@ -56,13 +56,13 @@ The console commands and the PIC link have their own, in `tests/commands`: every
 | `esp_src.ino` | `setup()` and `loop()` |
 | `src/board.h`, `src/version.h` | Pin map and baud rates, firmware version |
 | `src/common/` | Links to the shared protocol definitions |
-| `src/pic/` | The PIC link: SML framing, the PIC's console text, its held state, commands in both directions, pairing TIME-AUTH with the epoch edge. Also the PIC state report. `sml/` links to the shared SML codec |
+| `src/pic/` | The PIC link: SML framing, the PIC's console text, its held state, commands in both directions, pairing TIME-AUTH with the epoch edge. Also the PIC state report, and the PIC's updates: its files (`pic_file`), their staging in `picfw` (`pic_store`), the bootloader exchange (`pic_update`) and its console glue (`pic_boot`). `sml/` links to the shared SML codec and boot layout |
 | `src/timing/` | NTP client and packet handling, the clock model, ESP PPS output, PIC epoch and GNSS PPS capture |
 | `src/tz/` | tzinfo lookups and cache, TZ-STATE assembly, TIME-LEAP |
-| `src/net/` | WiFi, dual-stack connections with fallback, Telnet, OTA updates, STAT-NET |
+| `src/net/` | WiFi, dual-stack connections with fallback, Telnet, the update manifest and updates, STAT-NET |
 | `src/console/` | Console line input and output, the command table |
 | `src/settings/` | Preferences stored in NVS |
-| `src/util/` | Argument parsing, time formatting |
+| `src/util/` | Argument parsing, time formatting, SHA-256 |
 
 | Pin | Function |
 | --- | --- |
@@ -215,6 +215,77 @@ Sync:     LOCKED on GNSS, synchronised
   NTP       good           13.70 ms   -571.0 us       0s
 GNSS:     3D OK, tAcc 12 ns
 ```
+
+# Updates
+
+The updater ([src/net/updater.cpp](src/net/updater.cpp)) reads the manifest at `https://<update server><update path>`, by default `/smol_clock/v2plus/manifest.json`. A clock with the old default path (`/smol_clock/v2plus/update.json`) saved is moved to the new one when its settings load.
+
+## Manifest
+
+```json
+{
+  "format": 2,
+  "configurations": [
+    {
+      "hardware": "v2",
+      "config": "development",
+      "devices": ["A0:B1:C2:D3:E4:F5"],
+      "esp": {"version": "0.4.0", "url": "https://…/esp_src.bin", "size": 1252320, "sha256": "…"},
+      "pic": {"version": "0.4.0", "url": "https://…/dspic_src.smolpic", "size": 177280, "sha256": "…"},
+      "pic_spl": {"version": "0.1.0", "url": "https://…/dspic_spl.smolspl", "size": 9088, "sha256": "…"}
+    }
+  ]
+}
+```
+
+Every configuration is checked before any is used, and a manifest with a malformed one is refused whole. The clock takes the first configuration whose `hardware` is `v2`, whose `config` matches `update config` (absent means the default, none), and whose `devices`, if given, include its MAC address (any case). Each component is optional, but a configuration needs at least one. Versions are dotted numbers, compared numerically (`1.10` is newer than `1.9`). A download must match the manifest's size and SHA-256, or it is discarded. `pic_spl` is read and reported, but not yet installed.
+
+[dspic_src/tools/make_manifest.py](../dspic_src/tools/make_manifest.py) writes the manifest for a set of files, reading each version from the file itself (the PIC's headers, the ESP's user agent string), and adds to or replaces a configuration in an existing one with `--merge`:
+
+```
+make_manifest.py --base-url https://rubidium.darksky.io/smol_clock/v2plus/dev/ --esp esp_src.ino.bin --pic app.smolpic --pic-spl spl.smolspl -o manifest.json
+```
+
+## Order
+
+Newer only, unless forced. The ESP goes first: the PIC's application is only installed by an ESP at or past its configuration's ESP version, so a PIC never runs against an ESP that does not know its SML version. The ESP also checks that the application's SML major version is its own before installing it. The daily check installs the ESP's update and restarts, or else the PIC's.
+
+## The PIC's files
+
+The PIC's application (`.smolpic`) and SPL (`.smolspl`) files come from `dspic_src/tools/make_image.py`: a 64-byte header with its own CRC-32, then the image packed three bytes per instruction. They are staged in the `picfw` partition (512 KB):
+
+| Offset | Slot |
+| --- | --- |
+| 0x00000 | Application 0, 240 KB |
+| 0x3C000 | Application 1, 240 KB |
+| 0x78000 | SPL 0, 12 KB |
+| 0x7B000 | SPL 1, 12 KB |
+| 0x7E000 | Spare, 8 KB |
+
+A file is written image first, its header last, so a slot interrupted mid-write has no valid header. A slot is only trusted when its header's CRC and the image's CRC both pass, whatever else was in the flash before. A download goes to a slot with no valid file, else the one whose version is not the one the PIC runs, else the older. The slot the PIC runs from is kept, so a file already staged (same version and SHA-256) is installed again without a download.
+
+The application the PIC runs is kept staged too. When the manifest offers the version the PIC runs and no slot holds it, `update check`, `update install`, `update pic` and the daily check download it into a slot (`PIC: staging 0.3.1, the application it runs, into slot 0`). So a clock that has been online once holds a copy of its own application.
+
+Without the update server (no Wi-Fi, or the server down), `update pic force` installs a staged file: the version the PIC runs, else the newest. `update pic` does the same unasked when the PIC is in its SPL without a valid application. And the ESP does it by itself: a PIC that stays in its SPL without a valid application for 30 s (an update cut short, its power pulled mid-update) is given the staged file it last ran, else the newest, up to three times per ESP start.
+
+## Installing on the PIC
+
+The exchange with the PIC's SPL ([src/pic/pic_update.c](src/pic/pic_update.c)): ENTER_BOOTLOADER to the application, then BOOT-STATUS from the SPL, HOLD, ERASE, the image in 192-byte BOOT-DATA chunks (blank ones skipped), each checked against the SPL's CRC, a read back of the whole image with BOOT-VERIFY, COMMIT, then RUN and STAT-SYS from the new application. A chunk or command that goes unanswered is sent again, and an error that leaves the PIC's state unclear starts a new pass from STATUS, up to three. A PIC that already runs the version and CRC offered is told to RUN, unless forced. While the PIC is in its SPL, the ESP sends it nothing but bootloader messages, and console commands for the application say so.
+
+```
+PIC update: to 0.4.0, 58838 instructions
+PIC update: asking the application for the SPL
+PIC update: erasing
+PIC update: writing 920 chunks
+PIC update: written 25%
+…
+PIC update: reading back
+…
+PIC update: committing
+PIC update: DONE, the PIC runs it, <seconds> s
+```
+
+`pic boot` prints what the SPL reports (its mode, versions, whether the application is valid) when the PIC is in it, or else the application's version, then the staged files (`-v` also the SPL slots) and how the last update went. `pic boot run` and `pic boot hold` send RUN and HOLD to the SPL.
 
 # Telnet
 

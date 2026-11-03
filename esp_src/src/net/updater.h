@@ -1,19 +1,29 @@
 /*
- * OTA updates pulled from https://<updater.server><updater.path>: a JSON
- * manifest in ESP32-OTA-Pull's format, matched against ESP_VERSION and
- * updater.config, then the image it names. Done here rather than by the
- * library so that both requests connect with IPv6/IPv4 fallback
- * (net_connect.h); the library makes its own connections.
+ * Updates pulled from https://<updater.server><updater.path>: the update
+ * manifest, format 2 (manifest.h), then the files its configuration for this
+ * clock names: the ESP's image, and the PIC's application (and, offered but
+ * not yet installed, its SPL). Every request connects with IPv6/IPv4
+ * fallback (net_connect.h).
+ *
+ * Newer only, unless forced. The ESP first: the PIC's application is only
+ * installed by an ESP at (or past) its configuration's ESP version, so a PIC
+ * never runs against an ESP that does not know its SML version. A download is
+ * checked against the manifest's size and SHA-256 before it is used. The
+ * PIC's file is staged in picfw (pic_store.h) and installed from there
+ * (pic_boot.h), so a failed install is retried without the network.
  *
  * Automatic updates: once a day, in the local hour updater.auto_hour, the
- * ESP checks and, if there is an update, installs it and restarts. Not in
- * the hour it started in, so an update does not run twice.
+ * ESP checks; it installs an ESP update and restarts, or else installs the
+ * PIC's. Not in the hour it started in, so an update does not run twice.
  */
 #ifndef UPDATER_H
 #define UPDATER_H
 
 #include <Arduino.h>
 #include <stdint.h>
+
+// The firmware's own hardware name in the manifest.
+#define UPDATER_HARDWARE "v2"
 
 void updater_set_server(const char *server);
 void updater_set_path(const char *path);
@@ -22,13 +32,17 @@ void updater_set_config(const char *config);
 // Once a minute; local_seconds is local civil time, valid if have_local.
 void updater_service(bool have_local, uint32_t local_seconds);
 
-// Reports to output. check: is there an update? pull: install it, restart
-// later. force: install whatever is offered, any version, and restart.
+// Reports to output. check: what is offered, for the ESP and the PIC. pull:
+// the next update due, the ESP's (restart later to use it), else the PIC's.
+// force: the ESP's image whatever its version, and restart. pic: the PIC's
+// application, if newer (force: whatever its version).
 bool updater_check(Stream *output);
 void updater_pull(Stream *output);
 void updater_force(Stream *output);
+void updater_pic(Stream *output, bool force);
 
-bool updater_is_available(void);
+bool updater_is_available(void);     // the ESP's
+bool updater_pic_is_available(void); // the PIC's application
 bool updater_is_running(void);
 
 #endif // UPDATER_H

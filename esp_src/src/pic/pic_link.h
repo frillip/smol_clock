@@ -17,6 +17,12 @@
  * ESP sends CMD-USER SHOW (everything) at start, and its periodic frames (STAT-NET every
  * 10 s) bring a PIC back to SML mode after the PIC resets.
  *
+ * The PIC's SPL: a BOOT-STATUS from it (any mode but APP) means the PIC is in
+ * its bootloader. Until the next STAT-SYS from the application the link is
+ * quiet: pic_link_send() and pic_link_request() send nothing but class 0xF0,
+ * so no frame reaches the SPL while it writes flash. The PIC update
+ * (pic_boot) sends its own frames with pic_link_send_wire().
+ *
  * TIME-AUTH pairing: the label arrives a few ms after the edge it labels, so
  * it is paired with the latest captured edge if that is under 900 ms old.
  * Bytes read after the loop was held up (an HTTP request) may be older than
@@ -53,6 +59,8 @@ typedef struct
     uint32_t unpaired;    // ... not paired
     uint32_t backlogs;    // services that found the loop had been held up
     uint32_t restarts;    // PIC restarts seen (STAT-SYS uptime dropped)
+    uint32_t held_back;   // frames not sent while the PIC was in its SPL
+    uint32_t spl_entries; // times the PIC was seen entering its SPL
 } PicLinkStats;
 
 typedef struct
@@ -71,9 +79,19 @@ typedef struct
 typedef uint16_t (*PicCommandHandler)(uint16_t command, uint32_t argument, uint16_t *detail,
                                       bool *restart);
 
+// Every valid frame from the PIC, before the link handles it (pic_boot).
+typedef void (*PicFrameHook)(const SmlFrame *frame);
+
 void pic_link_init(void);
 void pic_link_service(void);
 void pic_link_set_command_handler(PicCommandHandler handler);
+void pic_link_set_frame_hook(PicFrameHook hook);
+
+// The PIC is in its SPL: a BOOT-STATUS from it, no STAT-SYS since.
+bool pic_link_in_spl(void);
+// A frame whose payload is already in wire order, sent whatever the mode.
+void pic_link_send_wire(uint8_t class_id, uint8_t message_id, const uint8_t *payload,
+                        uint16_t length);
 
 // The PIC has sent SML frames recently (it is in SML mode).
 bool pic_link_is_sml(void);

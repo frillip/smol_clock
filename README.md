@@ -138,13 +138,15 @@ The current console has no login and uses plain Telnet, so anyone with access to
 
 ## OTA firmware updates
 
-The [ESP updater](esp_src/src/net/updater.cpp) can pull firmware over WiFi using an HTTPS update manifest. The hostname and path of the manifest are configurable. An optional configuration string selects an update profile, for example `development`, with `default` clearing that selection.
+The [ESP updater](esp_src/src/net/updater.cpp) pulls firmware over WiFi from an HTTPS update manifest, `/smol_clock/v2plus/manifest.json` by default. The hostname and path of the manifest are configurable. An optional configuration string selects an update profile, for example `development`, with `default` clearing that selection. The manifest names the ESP's image and the PIC's application for each configuration, each with its version, size and SHA-256 (the [ESP README](esp_src/README.md#updates) has the format).
 
-`update check` checks what is available without installing anything. `update install` installs an applicable update but leaves the ESP running until `esp reset` completes the change. `update install force` bypasses the normal version comparison, permits downgrades and requests an immediate reboot after installation. Useful when testing, though somewhat more committed than merely checking.
+`update check` checks what is available for both chips without installing anything. `update install` installs the next update due: the ESP's if it is newer, leaving the ESP running until `esp reset` completes the change, otherwise the PIC's application. `update install force` installs the ESP's image whatever its version and restarts. Useful when testing, though somewhat more committed than merely checking. `update pic` installs the PIC's application if it is newer, `update pic force` whatever its version.
 
-Automatic updates are enabled by default. The ESP checks once a day at the start of a chosen local hour, defaulting to 04:00, and installs and reboots if an update is available. An ESP that starts within that hour skips that day's check, in case it has just installed the update. `update auto 4` turns it on for that hour, save changes with `save`. They can be disabled with `update auto off`.
+The PIC's application goes in through its bootloader: the ESP stages the file in its own flash, puts the PIC in its bootloader, writes and reads back the image, and only then commits it. A failed or interrupted update can leave the PIC in its bootloader without an application. After 30 s the ESP installs the staged file again by itself, without the network. The ESP also keeps a copy of the application the PIC runs, fetched by `update check` when none is staged, so `update pic force` can reinstall it offline. `pic boot` shows what the bootloader reports and the staged files, `pic boot run` starts the application, and `pic boot hold` keeps the PIC in its bootloader.
 
-This updater only replaces the ESP firmware. A PIC bootloader and firmware update path are still on the pending features list.
+Automatic updates are enabled by default. The ESP checks once a day at the start of a chosen local hour, defaulting to 04:00. It installs an ESP update and reboots, or else installs the PIC's. An ESP that starts within that hour skips that day's check, in case it has just installed the update. `update auto 4` turns it on for that hour, save changes with `save`. They can be disabled with `update auto off`.
+
+The PIC's application is only installed by an ESP at or past the ESP version its configuration names, so the ESP always goes first. Updating the PIC's bootloader itself is not supported yet.
 
 ## Remote timezone information
 
@@ -232,7 +234,8 @@ Values are written as people write them: on/off (or 1/0, yes/no), offsets as `+5
 | `pic stored` | What the PIC has in flash |
 | `pic save`, `pic defaults`, `pic reset` | Save, defaults or reset for the PIC alone |
 | `pic resync` | Judge every time source again from scratch and choose again, holdover dropped. The time of day carries on |
-| `pic bootloader` | Reserved: the PIC answers that it cannot, yet |
+| `pic bootloader` | Enter the PIC's bootloader |
+| `pic boot [run\|hold]` | The PIC's bootloader and the staged files. `run` starts the application, `hold` keeps the PIC in its bootloader |
 
 ## The ESP
 
@@ -254,7 +257,8 @@ Values are written as people write them: on/off (or 1/0, yes/no), offsets as `+5
 | `telnet port <n>` | The port, 1–65535 |
 | `update` | The running version, the update server and the automatic update setting |
 | `update check` | Is there an update? |
-| `update install [force]` | Install an update, finished by `esp reset`, `force` installs whatever is offered, any version, and restarts |
+| `update install [force]` | Install the next update: the ESP's if newer (finished by `esp reset`), else the PIC's. `force` installs the ESP's, any version, and restarts |
+| `update pic [force]` | Install the PIC's application if newer, `force` any version |
 | `update server <host>`, `update path <path>` | The update manifest |
 | `update config <name>` | An update profile such as `development`, `default` clears it |
 | `update auto off\|<hour>` | Daily automatic updates in that local hour, 0–23 |

@@ -58,6 +58,8 @@ static PicLinkStats stats;
 static Held held[HELD_MAX];
 static Pending pending[PENDING_MAX];
 static PicCommandHandler command_handler;
+static PicFrameHook frame_hook;
+static bool in_spl;
 static PicTime pic_time;
 static Settings settings;
 static uint16_t next_token = 1;
@@ -99,6 +101,11 @@ void pic_link_send(uint8_t class_id, uint8_t message_id, const void *native)
     uint8_t frame[SML_MAX_FRAME_BYTES];
     uint16_t length;
 
+    if (in_spl && class_id != SML_CLASS_BOOT)
+    {
+        stats.held_back++;
+        return;
+    }
     length = sml_frame_message(class_id, message_id, native, frame);
     if (length != 0)
     {
@@ -148,10 +155,36 @@ static Pending *take_slot(uint16_t command, uint32_t argument, Stream *reply_to,
     return slot;
 }
 
+void pic_link_send_wire(uint8_t class_id, uint8_t message_id, const uint8_t *payload,
+                        uint16_t length)
+{
+    uint8_t frame[SML_MAX_FRAME_BYTES];
+    uint16_t bytes = sml_frame(class_id, message_id, payload, length, frame);
+
+    if (bytes != 0)
+    {
+        uart.write(frame, bytes);
+        stats.sent++;
+    }
+}
+
+
 uint16_t pic_link_request(uint16_t command, uint32_t argument, Stream *reply_to, bool verbose)
 {
     SML_CMD_USER_PAYLOAD request;
-    Pending *slot = take_slot(command, argument, reply_to, verbose);
+    Pending *slot;
+
+    if (in_spl)
+    {
+        if (reply_to != NULL)
+        {
+            reply_to->printf("PIC %s: not sent, the PIC is in its SPL (pic boot)\n",
+                             pic_report_command_name(command));
+        }
+        stats.held_back++;
+        return 0;
+    }
+    slot = take_slot(command, argument, reply_to, verbose);
 
     memset(&request, 0, sizeof(request));
     request.command = command;
@@ -374,6 +407,12 @@ static void note_system(const SML_STAT_SYS_PAYLOAD *sys)
     static uint32_t last_uptime_s;
     char version[16];
 
+    if (in_spl)
+    {
+        in_spl = false;
+        console_printf("PIC: out of its SPL\n");
+    }
+
     pic_report_version(version, sizeof(version), sys->pic_version);
     if (!seen || sys->uptime_s < last_uptime_s)
     {
@@ -389,6 +428,19 @@ static void note_system(const SML_STAT_SYS_PAYLOAD *sys)
     last_uptime_s = sys->uptime_s;
 }
 
+// BOOT-STATUS from the SPL: the link goes quiet, until STAT-SYS.
+static void note_boot_status(const SML_BOOT_STATUS_PAYLOAD *status)
+{
+    if (status->mode == SML_BOOT_MODE_APP || in_spl)
+    {
+        return;
+    }
+    in_spl = true;
+    stats.spl_entries++;
+    console_printf("PIC: in its SPL (%s)\n", pic_report_boot_mode_name(status->mode));
+}
+
+
 static void handle_frame(const SmlFrame *frame)
 {
     const SmlMessage *message = sml_message(frame->class_id, frame->message_id);
@@ -396,6 +448,10 @@ static void handle_frame(const SmlFrame *frame)
 
     stats.frames++;
     last_frame_ms = millis();
+    if (frame_hook != NULL)
+    {
+        frame_hook(frame);
+    }
     if (message == NULL)
     {
         stats.unknown++;
@@ -441,6 +497,10 @@ static void handle_frame(const SmlFrame *frame)
     if (frame->class_id == SML_CLASS_STAT && frame->message_id == SML_STAT_SETTINGS)
     {
         note_settings((const SML_STAT_SETTINGS_PAYLOAD *)native);
+    }
+    if (frame->class_id == SML_CLASS_BOOT && frame->message_id == SML_BOOT_STATUS)
+    {
+        note_boot_status((const SML_BOOT_STATUS_PAYLOAD *)native);
     }
     Held *slot = find_held(frame->class_id, frame->message_id, true);
     if (slot != NULL)
@@ -525,6 +585,18 @@ void pic_link_service(void)
 void pic_link_set_command_handler(PicCommandHandler handler)
 {
     command_handler = handler;
+}
+
+
+void pic_link_set_frame_hook(PicFrameHook hook)
+{
+    frame_hook = hook;
+}
+
+
+bool pic_link_in_spl(void)
+{
+    return in_spl;
 }
 
 bool pic_link_is_sml(void)

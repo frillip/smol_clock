@@ -14,6 +14,8 @@ const char *pic_report_error_name(uint16_t error);
 const char *pic_report_source_name(uint8_t source);
 const char *pic_report_lock_name(uint8_t lock);
 const char *pic_report_tz_source_name(uint8_t source);
+// BOOT-STATUS mode: WINDOW, HELD, NO_APP, LOOP, APP.
+const char *pic_report_boot_mode_name(uint8_t mode);
 // The most telling of the SML_RESET_* bits, as text.
 const char *pic_report_reset_name(uint16_t cause);
 // "0.1.0" from major << 16 | minor << 8 | patch.

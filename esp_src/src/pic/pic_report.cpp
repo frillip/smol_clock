@@ -63,9 +63,16 @@ const char *pic_report_error_name(uint16_t error)
 {
     static const char *const names[] = {"none",   "unsupported",    "length", "argument",
                                         "busy",   "stale revision", "schema", "storage",
-                                        "verify", "state"};
+                                        "verify", "state",          "CRC",    "not blank"};
 
-    return error < 10 ? names[error] : "?";
+    return error < sizeof(names) / sizeof(names[0]) ? names[error] : "?";
+}
+
+const char *pic_report_boot_mode_name(uint8_t mode)
+{
+    static const char *const names[] = {"WINDOW", "HELD", "NO_APP", "LOOP", "APP"};
+
+    return mode < sizeof(names) / sizeof(names[0]) ? names[mode] : "?";
 }
 
 const char *pic_report_source_name(uint8_t source)
