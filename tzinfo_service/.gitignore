@@ -1,0 +1,5 @@
+/GeoLite2*
+/*.mmdb
+/*.log
+/*.tar.gz
+/.venv/
