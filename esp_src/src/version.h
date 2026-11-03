@@ -4,7 +4,7 @@
 // The update server compares ESP_VERSION; STAT-NET carries the numeric form.
 #define ESP_VERSION_MAJOR 0
 #define ESP_VERSION_MINOR 3
-#define ESP_VERSION_PATCH 40
+#define ESP_VERSION_PATCH 45
 
 #define VERSION_STRINGIFY_(x) #x
 #define VERSION_STRINGIFY(x)  VERSION_STRINGIFY_(x)

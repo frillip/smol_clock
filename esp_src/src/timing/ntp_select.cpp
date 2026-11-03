@@ -1,5 +1,6 @@
 #include "ntp_select.h"
 
+#include <math.h>
 #include <string.h>
 
 static int members(unsigned set)
@@ -141,13 +142,53 @@ void ntp_select(const NtpCandidate *candidates, int count, int current, NtpSelec
 }
 
 
-char ntp_verdict_marker(NtpVerdict verdict)
+void ntp_combine(const NtpCandidate *candidates, int count, NtpSelection *selection)
+{
+    const NtpCandidate *followed;
+    double weights = 0.0;
+    double sum = 0.0;
+    int index;
+
+    selection->combined = 0;
+    for (index = 0; index < NTP_SELECT_MAX; index++)
+    {
+        selection->in_combined[index] = false;
+    }
+    if (selection->selected < 0 || selection->selected >= count)
+    {
+        selection->combined_offset_us = 0;
+        return;
+    }
+    followed = &candidates[selection->selected];
+    for (index = 0; index < count && index < NTP_SELECT_MAX; index++)
+    {
+        const NtpCandidate *c = &candidates[index];
+        double weight;
+
+        if (index != selection->selected &&
+            (!selection->majority || selection->verdict[index] != NTP_VERDICT_CANDIDATE ||
+             c->distance_us > NTP_COMBINE_LIMIT * followed->distance_us))
+        {
+            continue;
+        }
+        weight = 1.0 / (double)(c->distance_us > 0 ? c->distance_us : 1);
+        weights += weight;
+        sum += weight * (double)(c->offset_us - followed->offset_us);
+        selection->in_combined[index] = true;
+        selection->combined++;
+    }
+    // Relative to the followed server's offset, so the sum stays small.
+    selection->combined_offset_us = followed->offset_us + (int64_t)llround(sum / weights);
+}
+
+
+char ntp_verdict_marker(NtpVerdict verdict, bool combined)
 {
     switch (verdict)
     {
         case NTP_VERDICT_UNUSABLE: return '?';
         case NTP_VERDICT_FALSETICKER: return 'x';
-        case NTP_VERDICT_CANDIDATE: return '+';
+        case NTP_VERDICT_CANDIDATE: return combined ? '+' : '-';
         case NTP_VERDICT_SELECTED: return '*';
         default: return ' ';
     }

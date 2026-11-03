@@ -16,6 +16,13 @@
  *
  * Among those that agree, the one with the shortest distance is followed;
  * the one in use is kept unless another's distance is under half of its.
+ *
+ * Combining (ntp_combine), as chronyd does: with a majority, the offsets of
+ * the servers that agree and whose distance is within NTP_COMBINE_LIMIT
+ * times the followed one's are averaged, each weighted by 1 / its distance,
+ * and the clock is steered by that average rather than the followed
+ * server's offset alone. Without a majority, the followed server alone.
+ * The servers that agree but are left out are shown '-', as chronyc does.
  */
 #ifndef NTP_SELECT_H
 #define NTP_SELECT_H
@@ -23,7 +30,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define NTP_SELECT_MAX 4
+#define NTP_SELECT_MAX    4
+#define NTP_COMBINE_LIMIT 3
 
 typedef enum
 {
@@ -49,12 +57,19 @@ typedef struct
     int usable;
     int agreeing;
     NtpVerdict verdict[NTP_SELECT_MAX];
+    // ntp_combine():
+    int combined;                  // servers in the average, 0 with none followed
+    bool in_combined[NTP_SELECT_MAX];
+    int64_t combined_offset_us;    // the weighted average of their offsets
 } NtpSelection;
 
 // current: the server followed now, or -1.
 void ntp_select(const NtpCandidate *candidates, int count, int current, NtpSelection *selection);
 
-// *, +, x, ? or a space.
-char ntp_verdict_marker(NtpVerdict verdict);
+// After ntp_select(), on the same candidates.
+void ntp_combine(const NtpCandidate *candidates, int count, NtpSelection *selection);
+
+// *, +, x, ? or a space; combined false turns + into - (agrees, left out).
+char ntp_verdict_marker(NtpVerdict verdict, bool combined);
 
 #endif // NTP_SELECT_H

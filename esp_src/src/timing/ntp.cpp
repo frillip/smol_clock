@@ -77,6 +77,7 @@ typedef struct
     int fed_by;  // the server whose samples the frequency window holds: -1 none
                  // yet, FED_BY_OTHER one since changed
     NtpSelection selection;
+    uint32_t combined_updates; // clock updates from more than one server
     bool disagree;           // reported: the usable servers have no majority
     uint32_t max_interval_s; // ntp.interval: the longest poll interval
     uint32_t interval_s;     // the interval in use, adaptive below that
@@ -413,17 +414,25 @@ static bool usable(const NtpServer *server, int64_t now)
 }
 
 
-// The server's latest sample to the clock, unless it has had it.
+// The server's latest sample to the clock, unless it has had it. Its
+// offset is the servers' combined one when there is one (ntp_combine()):
+// the followed server's sample moved by the difference.
 static void apply(int index)
 {
     NtpServer *server = &ntp.servers[index];
-    const EspClockSample *sample = latest(server);
+    EspClockSample combined = *latest(server);
+    const EspClockSample *sample = &combined;
     const EspClockStatus *status = esp_clock_status();
     EspClockAction action;
 
     if (server->count == 0 || server->applied_local_us == sample->local_us)
     {
         return;
+    }
+    if (esp_clock_is_valid() && ntp.selection.selected == index && ntp.selection.combined > 1)
+    {
+        combined.offset_us += ntp.selection.combined_offset_us - server->offset_us;
+        ntp.combined_updates++;
     }
     if (ntp.fed_by != index)
     {
@@ -501,6 +510,7 @@ static void select_server(int fresh)
         candidates[index].distance_us = server->distance_us;
     }
     ntp_select(candidates, NTP_SERVERS, ntp.peer, &ntp.selection);
+    ntp_combine(candidates, NTP_SERVERS, &ntp.selection);
     for (int index = 0; index < NTP_SERVERS; index++)
     {
         ntp.servers[index].verdict = ntp.selection.verdict[index];
@@ -908,7 +918,8 @@ static void print_us(Stream *output, int64_t us, bool plus)
 
 
 /*
- * Like chronyc sources: * the server followed, + one that agrees, x one
+ * Like chronyc sources: * the server followed, + one that agrees and is
+ * combined with it, - one that agrees but is too far to combine, x one
  * the others outvote (or, without a majority, do not vouch for), ? one
  * without a recent good sample. Reach is the last eight polls in octal, as
  * chronyc shows it (377: all good). Offset is the latest sample's, against
@@ -938,7 +949,9 @@ void ntp_print_sources(Stream *output, bool verbose)
             }
             continue;
         }
-        output->printf("%c %d %-24.24s", ntp_verdict_marker(server->verdict), index + 1,
+        output->printf("%c %d %-24.24s",
+                       ntp_verdict_marker(server->verdict, ntp.selection.in_combined[index]),
+                       index + 1,
                        server->host);
         if (server->count == 0)
         {
@@ -1015,6 +1028,14 @@ void ntp_print_tracking(Stream *output)
     }
     print_agreement(output);
     output->printf("\n");
+    if (ntp.selection.combined > 1)
+    {
+        output->printf("Combined:  %d servers, offset ", ntp.selection.combined);
+        time_print_ns(output, ntp.selection.combined_offset_us * 1000);
+        output->printf(" (the followed one's ");
+        time_print_ns(output, ntp.servers[ntp.peer].offset_us * 1000);
+        output->printf("); %lu updates combined\n", (unsigned long)ntp.combined_updates);
+    }
     print_clock_line(output, "Clock:     ");
     if (!esp_clock_is_valid())
     {
