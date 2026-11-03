@@ -32,10 +32,12 @@
  * (sd 1) for the ESP PPS on the NTP clock. An edge that coincides with the
  * epoch waits for the epoch interrupts (priority 4) as well: the GNSS PPS on
  * a GNSS-locked clock was 196 ticks (sd 0.6). So a watched source within a
- * few microseconds of the epoch reads ~4 us late.
+ * few microseconds of the epoch reads ~4 us late. Behind the IPL, every
+ * interrupt goes through the application's forwarding table first: a GOTO,
+ * 4 cycles on the dsPIC33E, so 37. To be measured again with a GNSS fix.
  */
 #ifndef PPS_MONITOR_LATENCY_TICKS
-#define PPS_MONITOR_LATENCY_TICKS 33L
+#define PPS_MONITOR_LATENCY_TICKS 37L
 #endif
 
 // One input's latest edge.

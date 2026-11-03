@@ -10,7 +10,11 @@ This firmware replaces the V2 firmware and the MCC-generated code it was built o
 
 # Building
 
-The project is an MPLAB X project in [nbproject](nbproject), built with XC16 2.10 for the dsPIC33EP256GP504. No MCC is involved: the configuration bits, clock set-up and peripheral set-up are all in the source.
+The project is an MPLAB X project in [nbproject](nbproject), built with XC16 2.10 for the dsPIC33EP256GP504. No MCC is involved: the clock set-up and peripheral set-up are all in the source.
+
+The application runs behind the bootloader: the IPL in page 0 ([dspic_ipl](../dspic_ipl)) and the SPL in pages 1–3 ([dspic_spl](../dspic_spl)). It is linked from 0x002000 with [app.gld](app.gld), generated from Microchip's script for the device by [tools/gen_app_gld.py](tools/gen_app_gld.py): its entry at 0x002000, then a forwarding table of one `GOTO` per interrupt vector, which the IPL's interrupt table points at. [platform/app_vectors.s](platform/app_vectors.s) keeps the linker's own interrupt table out of the hex and the version-record page free. The configuration words are the IPL's, programmed with it, so the application's hex has none.
+
+To program a chip, use the hex `tools/make_image.py install` (in the repository root) makes from the IPL's, the SPL's and the application's hex files (`tools/make_dist.py` writes it with every release), with the settings pages 0x029800–0x02A7FF preserved. Programming the application alone leaves a chip with no reset vector and erased configuration words. For debugging, add the IPL's released hex (`dspic_ipl/release/`) to the project's Loadables.
 
 The SML codec and protocol definitions are shared with the ESP. They are not copied into this folder: the project includes `common/sml_proto.h`, `common/sml.c` and `common/sml.h`, along with `common/enums.h`, directly from [common](../common). The includes (`../../common/sml.h` and friends) rely on the repository layout, so keep the two folders side by side.
 
@@ -45,21 +49,26 @@ Most of the firmware has host tests, built with gcc against stand-ins for the ha
 - the ESP link and payloads, the time zone schedule, the calendar (every day from 1970 to 2106) and the report formatter;
 - the I2C master, the PCF8563 driver and the RTC source: its second searched for, its rate, the anchor and bound, and setting it;
 - the settings and the flash journal, through simulated power cuts;
-- the light sensor and brightness, the button and switch, the menu (and setting the time from it), the alarm, beeps and buzzer.
+- the light sensor and brightness, the button and switch, the menu (and setting the time from it), the alarm, beeps and buzzer;
+- the bootloader's shared layout and checksums ([common/boot_layout.h](../common/boot_layout.h), [common/boot_crc.c](../common/boot_crc.c)) against its specification.
 
 ```
 cd tests/host && make
 ```
 
+The image tool has Python tests of its own: `python3 -m unittest discover -s tests/tools -t tests/tools`.
+
 [tools/format.sh](tools/format.sh) applies the house style: clang-format with [.clang-format](.clang-format), then [tools/style.py](tools/style.py). Firmware sources use CRLF line endings, the host tests LF.
+
+[tools/make_image.py](../tools/make_image.py) turns production `.hex` files into the bootloader's files: the application image and the SPL image the ESP sends, and the first-installation hex for a PICkit. `info` checks a file.
 
 # Layout
 
 | Folder | Contents |
 | --- | --- |
 | `main.c` | The task list, and the order modules are started and run in |
-| `platform/` | Clock and configuration bits, the pin map, millisecond helpers, UTC and calendar arithmetic |
-| `drivers/` | UART1 (the ESP link), UART2 (GNSS), the tube drivers, I2C1, the PCF8563 RTC, the VEML6040 light sensor, and program flash for the settings |
+| `platform/` | Clock set-up, the pin map, millisecond helpers, UTC and calendar arithmetic, the boot mailbox, the watchdog, the trap handlers and the fault record |
+| `drivers/` | UART1 (the ESP link), UART2 (GNSS), the tube drivers, I2C1, the PCF8563 RTC, the VEML6040 light sensor, program flash for the settings, and what flash holds of the boot stages |
 | `console/` | Console output over the ESP link, the fast text formatter, and the debug mask |
 | `timing/` | PPS capture, the epoch timer and output, the control loop and its console report, and the cooperative scheduler that runs the task list |
 | `sync/` | Time source evaluation and selection, holdover, and the UTC second of each epoch |
@@ -346,24 +355,74 @@ They live in two erase pages reserved at the top of program flash, apart from th
 
 | Program addresses | |
 | --- | --- |
-| 0x000000–0x0297FF | The application (and the bootloader, and the application's version and CRC trailer, to come) |
+| 0x000000–0x0007FF | The IPL |
+| 0x000800–0x001FFF | The SPL, its record at 0x001F80 |
+| 0x002000–0x028FFF | The application (from 0x028800 also the SPL's test page, while the application leaves it free) |
+| 0x029000–0x0297FF | The application's version record, at 0x029000, written last on an update |
 | 0x029800–0x02A7FF | The settings store: two pages of 1024 instructions, 2KB of data each |
 | 0x02A800–0x02AFFF | The last page: the configuration words from 0x02AFEC, and nothing else |
 
-The rest of the last page is reserved too, empty, so no application code lands in it. Anything else there could only be rewritten by erasing the page, configuration words and all, and a reset before they were written back would start the chip on the erased defaults (watchdog on, another oscillator), which no bootloader could recover from. With the page left alone, the configuration words are programmed once with the bootloader and an update never erases them. The application's version and CRC trailer, for the bootloader to check, will go below the store, in 0x029000–0x0297FF, written last on an update.
+The rest of the last page is reserved too, empty, so no application code lands in it. Anything else there could only be rewritten by erasing the page, configuration words and all, and a reset before they were written back would start the chip on the erased defaults (watchdog on, another oscillator), which no bootloader could recover from. With the page left alone, the configuration words are programmed once with the IPL and an update never erases them.
 
-[drivers/flash.c](drivers/flash.c) reserves the pages with `address()` and `noload`, so the linker places nothing there and the hex has nothing for them, and writes nowhere else. Reprogramming the application therefore leaves the settings alone, as long as the programmer is told to: the project sets MPLAB's "Preserve program memory" range to 0x29800–0x2A7FF, since programming erases the whole chip first. A bootloader or update scheme must leave the range out in the same way.
+[drivers/flash.c](drivers/flash.c) reserves the pages with `address()` and `noload`, so the linker places nothing there and the hex has nothing for them, and writes nowhere else. Reprogramming the application therefore leaves the settings alone, as long as the programmer is told to: the project sets MPLAB's "Preserve program memory" range to 0x29800–0x2A7FF, since programming erases the whole chip first. The bootloader never erases it either.
 
 [settings/store.c](settings/store.c) keeps a journal in the two pages. Each page has a header with a generation number; records follow it, each with its type, length and a CRC, written a double word at a time with the CRC last. The latest intact record of each type counts, so a record cut short by a reset is passed over and the one before it stands. When a page is full, the other is erased, the latest of each record copied to it, and its header written last: until then the old page is still the one in use, whole. In the host tests a settings record of 42 bytes is written about 38 times between erases, and of 20,000 writes, 6,000 cut short by a simulated power cut at a random point, none lost a record already written. At that rate the flash's rated 10,000 erase cycles per page would take some 750,000 saves. The RTC's record is the one written often: hourly on a PCF8563 150ppm fast, which is set again at every check. About 50 fit beside the others, so each page is erased every four days or so, and lasts some 100 years.
 
 Erasing a page stops the CPU for roughly 20–30ms, with interrupts held off throughout; writing a double word takes some 50µs. The timers, captures and epoch output carry on in hardware, but the 1ms slot interrupt is missed, so `epoch_timer_resume()` brings the slots and milliseconds back to where T2/T3 stands afterwards. UART bytes arriving while the FIFOs are full would be lost, so the store writes only at 700–900ms into the second: after the GNSS burst and the ESP's per-second messages, well before the next epoch, with the I2C bus idle and the RTC source not timing a read or a release. At most one record is written each second. The erase and write times are measured on the capture timebase and shown by `pic stored`; the scheduler report counts the slots made up.
 
+# Bootloader
+
+The IPL leaves a mailbox in the top 16 bytes of RAM below 0x8000 (0x7FF0–0x7FFF), which no C start-up touches ([platform/boot.c](platform/boot.c), [common/boot_layout.h](../common/boot_layout.h)). It holds why the PIC reset: the IPL clears RCON's cause bits and keeps them there, so `last reset` and STAT-SYS `reset_cause` come from the mailbox. Started without the IPL, from a debugger say, the mailbox's magic is wrong and RCON is used as before. The mailbox also says how this start came about (the SPL, or the IPL directly with no SPL or a failed one), and counts hand-overs for the boot-loop guard: the application zeroes that count once it has run for 30 s, and the SPL stays after 8 starts without that.
+
+`ENTER_BOOTLOADER` leaves a request in the mailbox and resets once its ACK is out, and the SPL starts held. It is refused (`STATE`) without the IPL's mailbox or an intact SPL to stay in, and (`BUSY`) while a save is pending or the SPL writer is busy.
+
+## The SPL writer
+
+The application installs a new SPL itself ([esp/spl_writer.c](esp/spl_writer.c)): SML class 0xF0 for region SPL, from the ESP's `update spl`. STATUS answers BOOT-STATUS in mode `APP`. ERASE takes the record's page first, then the two code pages, and checks them blank. DATA chunks are written and read back, VERIFY reads any chunk at once, and COMMIT checks the code's CRC-32 against the record before writing the record and its commit. A new SPL's COMMIT also zeroes the mailbox's trials (`boot_new_spl()`), so the IPL counts the new SPL's starts and not the last one's. HOLD, RUN and RESET are the SPL's (`UNSUPPORTED`).
+
+ERASE is refused (`STATE`) until the application has run healthily for 60 s: the program that stands in while the SPL is replaced has proved itself first. The flash routines (`flash_spl_erase_page()`, `flash_spl_write()`) refuse anything outside 0x000800–0x001FFF by themselves.
+
+Flash is erased and written only in the flash window, slots 700–900 of the epoch, the quiet time the settings store uses: at most one page erase an epoch, chunks as they arrive while it is open. A request that needs flash is answered once it is done, up to a second later. ERASE, COMMIT and CONFIRM answer `ACCEPTED`, then `ACK`. They are refused (`BUSY`) while a settings save is pending, and the settings store waits while one of them is under way.
+
+CONFIRM is the new SPL's last step: allowed only when this start was by an unconfirmed SPL, intact and not rejected, and the application has run 10 s (`APP_CONFIRM_S`, past two watchdog periods: the SPL's own work is already proved by its test page). Started by an unconfirmed SPL and healthy for 30 s, the application zeroes the mailbox's trials, as it does the hand-over attempts: trials are for an SPL that never comes up, and this one has, so resets before the confirmation do not spend them. Started with `SPL_GIVEN_UP` instead (the IPL gave up on an unconfirmed SPL after its trials), the application writes the SPL's reject in its first flash window, and the IPL starts the application directly until another SPL is installed. `pic -v` adds an `SPL writer:` line once it has done anything.
+
+`pic -v` shows the boot stages ([drivers/boot_image.c](drivers/boot_image.c)): the IPL's version, the SPL's record (committed, intact, confirmed or rejected), the application's record, and how this start came about. The SPL's CRC-32 is checked through the IPL's service at 0x000200.
+
+Every interrupt reaches its handler through the forwarding table, a `GOTO` of 4 cycles, so the PPS watch's latency is 37 ticks rather than V2's 33.
+
+The SPL ([dspic_spl](../dspic_spl/README.md)) can also be driven from a PC: [tools/pic_boot.py](../tools/pic_boot.py) installs an application file (`make_image.py app`) over any serial port wired to UART1, the ESP's UART bridge for instance, as the ESP does.
+
+# Watchdog and faults
+
+The watchdog runs at the IPL's period: PR128, PS1024 on the 32 kHz LPRC, 4.1 s nominal, 3.9 s measured ([platform/fault.c](platform/fault.c)). It starts at the end of start-up and is fed once a second by the epoch's work (`run_epoch()` in [main.c](main.c)), which runs from the main loop when the epoch timer's measurement slot comes round. So it is fed only while both are going: a main loop stuck anywhere, an interrupt that never lets it run, or an epoch timer that has stopped, each resets the PIC within 4 s, and the clock starts again with its RTC, saved settings and time zone schedule. Nothing else feeds it. Work that holds the main loop for seconds with good reason would call `watchdog_extend()` as it goes; nothing does so yet. A debug build (`__DEBUG`) leaves it off, so a breakpoint does not reset the PIC.
+
+The trap handlers ([platform/traps.s](platform/traps.s)) take the trap and its return address and reset. Before, a trap went to the default handler's reset and looked like a reset command.
+
+What happened is kept over the reset in a 32-byte record below the boot mailbox (0x7FD0–0x7FEF, [common/boot_layout.h](../common/boot_layout.h)), which neither the IPL nor the SPL touches: what was running, as the scheduler names its tasks (`10 ms`, `display load`, `epoch`, or `loop` for the main loop's own work between them), the uptime, and for a trap which one and where. At the next start it is read with the reset cause, and a fault is printed after the start-up line and in `pic -v`:
+
+```
+PIC 0.3.8, up 00:00:00, last reset: watchdog
+Fault: watchdog, in 10 ms, up 5321 s
+```
+
+```
+Fault: ADDRESS trap, before 0x01A2B4, in epoch, up 77 s
+```
+
+The address is the trap's return address, the instruction after the one at fault (bit 0 of the stacked word, the SFA flag, left out): look it up in the build's `.map` or listing. A watchdog reset after the application's own reset (`pic reset`, `ENTER_BOOTLOADER`) and before it ran again is put down to the SPL. A power-on or MCLR reset is never a fault, whatever RAM holds.
+
+STAT-SYS (SML 2.6) carries the fault to the ESP, which shows it as the last reset: `last reset: watchdog`, `last reset: ADDRESS trap`.
+
+A PIC that faults again and again within 30 s of each start ends up held in the SPL by its boot-loop guard (8 starts), where `update pic force` on the ESP installs another application.
+
+## The external clock
+
+The Fail-safe Clock Monitor is on (the IPL's configuration words). Should the 40 MHz external clock stop, the chip carries on from the internal FRC with an oscillator-fail trap, which is recorded and resets like any other (`OSCILLATOR trap`). At start-up, a switch to the external clock that has not completed after some 30 ms is abandoned, and the clock runs from the FRC's PLL instead, at 80.15 MHz trimmed with OSCTUN (-0.188%) to 80.00 MHz nominal, as accurate as the FRC (a percent or so over temperature). The UARTs, the display and the link to the ESP work as before, but the time is only as good as that: the control loop was never meant to steer across such an error. It says so at start-up (`Clock: the external clock did not start: on the internal oscillator`), and STAT-SYS (SML 2.7) carries `SML_SYS_CLOCK_FALLBACK` to the ESP, which shows `CLOCK FALLBACK` with the PIC's version. The external clock is tried again at the next reset. The SPL falls back in the same way, so updates still work.
+
 # Not yet ported
 
 The V2 firmware did rather more than this. Still to come:
 
-- GNSS provisioning;
-- the watchdog;
-- bootloader entry.
+- GNSS provisioning.
 
 The SML messages for most of these are already defined.

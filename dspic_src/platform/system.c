@@ -1,76 +1,73 @@
 #include "system.h"
 
-// Configuration bits
+#include "../../common/boot_layout.h"
+#include "boot.h"
+#include "fault.h"
 
-// FICD
-// ICD Communication Channel Select bits: Communicate on PGEC2 and PGED2
-#pragma config ICS = PGD2
-// JTAG Enable bit: JTAG is disabled
-#pragma config JTAGEN = OFF
-
-// FPOR
-// Alternate I2C1 pins: I2C1 mapped to ASDA1/ASCL1 (RB9/RB8), where the RTC
-// and sensors are wired. As V2. OFF would put I2C1 on SDA1/SCL1 instead.
-#pragma config ALTI2C1 = ON
-// Alternate I2C2 pins: I2C2 mapped to SDA2/SCL2 pins
-#pragma config ALTI2C2 = OFF
-// Watchdog Window Select bits: WDT Window is 25% of WDT period
-#pragma config WDTWIN = WIN25
-
-// FWDT
-// Watchdog Timer Postscaler bits: 1:32768
-#pragma config WDTPOST = PS32768
-// Watchdog Timer Prescaler bit: 1:128
-#pragma config WDTPRE = PR128
-// PLL Lock Enable bit: Clock switch to PLL source will wait until the PLL lock signal is valid.
-#pragma config PLLKEN = ON
-// Watchdog Timer Window Enable bit: Watchdog Timer in Non-Window mode
-#pragma config WINDIS = OFF
-// Watchdog Timer Enable bit: Watchdog timer enabled/disabled by user software
-#pragma config FWDTEN = OFF
-
-// FOSC
-// Primary Oscillator Mode Select bits: EC (External Clock) Mode
-#pragma config POSCMD = EC
-// OSC2 Pin Function bit: OSC2 is general purpose digital I/O pin
-#pragma config OSCIOFNC = ON
-// Peripheral pin select configuration: Allow multiple reconfigurations
-#pragma config IOL1WAY = OFF
-// Clock Switching Mode bits: Clock switching is enabled,Fail-safe Clock Monitor is disabled
-#pragma config FCKSM = CSECMD
-
-// FOSCSEL
-// Oscillator Source Selection: FRC
-#pragma config FNOSC = FRC
-// Two-speed Oscillator Start-up Enable bit: Start up with user-selected oscillator source
-#pragma config IESO = OFF
-
-// FGS
-// General Segment Write-Protect bit: General Segment may be written
-#pragma config GWRP = OFF
-// General Segment Code-Protect bit: General Segment Code protect is Disabled
-#pragma config GCP = OFF
+// The configuration words are the IPL's (dspic_ipl/ipl_config.c),
+// programmed once with it: an application image carries none. Programmed
+// without the IPL, the chip runs on the erased configuration words'
+// defaults, which this firmware does not expect.
 
 static void clock_init(void);
 
-// RCON as found at start-up: why the PIC last reset.
+// Why the PIC last reset, at start-up: from the IPL's mailbox (boot.h).
 static uint16_t reset_cause;
-
-// RCON's reset-cause bits (the rest are controls and status: SWDTEN,
-// VREGS, VREGSF, SLEEP, IDLE).
-#define RCON_CAUSES 0xC2D3U // TRAPR IOPUWR CM EXTR SWR WDTO BOR POR
 
 void system_init(void)
 {
+    uint16_t rcon = RCON;
+
     // First, before anything can reset again: the bits stay set until
     // cleared, so clearing them now makes the next reset's cause its own.
-    reset_cause = RCON;
-    RCON = (uint16_t)(RCON & ~RCON_CAUSES);
+    // The IPL has cleared them already and left the cause in the mailbox.
+    RCON = (uint16_t)(RCON & ~BOOT_RESET_CAUSES);
+    reset_cause = boot_init(rcon);
+    fault_init(reset_cause);
     board_init();
     clock_init();
     // Interrupt priorities are set by the module that owns each interrupt:
     // console_init() for UART1, timing/ for the timers and captures.
     __builtin_enable_interrupts();
+}
+
+
+// OSCCON NOSC: the primary oscillator (EC) through the PLL, and the FRC
+// through it.
+#define NOSC_PRIPLL 0x03U
+#define NOSC_FRCPLL 0x01U
+// A switch normally completes within about 1 ms (the PLL's lock). On the
+// FRC (3.685 MIPS) this many polls of OSWEN are some 30 ms: past that, the
+// new clock is not there.
+#define SWITCH_POLLS 20000U
+#define OSCTUN_FALLBACK 0x3CU // TUN -4: the FRC 0.188% slow
+
+static bool clock_fallback;
+
+// Switches to nosc, waits for it, and for the PLL's lock. False if it did
+// not complete: the switch abandoned, still on the FRC.
+static bool clock_switch(uint8_t nosc)
+{
+    uint16_t polls;
+
+    __builtin_write_OSCCONH(nosc);
+    __builtin_write_OSCCONL((uint8_t)(OSCCON | 0x01U));
+    for (polls = 0; OSCCONbits.OSWEN != 0U; polls++)
+    {
+        if (polls >= SWITCH_POLLS)
+        {
+            __builtin_write_OSCCONL((uint8_t)(OSCCON & 0xFEU)); // abandoned
+            return false;
+        }
+    }
+    for (polls = 0; OSCCONbits.LOCK != 1U; polls++)
+    {
+        if (polls >= SWITCH_POLLS)
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 
@@ -94,14 +91,25 @@ static void clock_init(void)
     PMD4 = 0x00;
     // PTGMD enabled; DMA0MD enabled;
     PMD7 = 0x00;
-    // CF no clock failure; NOSC PRIPLL; CLKLOCK unlocked; OSWEN Switch is Complete;
-    __builtin_write_OSCCONH((uint8_t)(0x03));
-    __builtin_write_OSCCONL((uint8_t)(0x01));
-    // Wait for Clock switch to occur
-    while (OSCCONbits.OSWEN != 0)
-        ;
-    while (OSCCONbits.LOCK != 1)
-        ;
+    // EC 40 MHz, PLLPRE 8, PLLDIV 62 (M 64), PLLPOST 4: Fosc 80 MHz.
+    if (clock_switch(NOSC_PRIPLL))
+    {
+        return;
+    }
+    // No external clock: the FRC (7.37 MHz), PLLPRE 2, PLLDIV 85 (M 87),
+    // PLLPOST 4: Fosc 80.15 MHz, 0.19% fast, which OSCTUN -4 (-0.188%)
+    // trims to 80.00 MHz, nominal; the FRC's own error remains.
+    clock_fallback = true;
+    OSCTUN = OSCTUN_FALLBACK;
+    CLKDIV = 0x3140;
+    PLLFBD = 0x55;
+    (void)clock_switch(NOSC_FRCPLL);
+}
+
+
+bool system_clock_fallback(void)
+{
+    return clock_fallback;
 }
 
 
@@ -137,6 +145,7 @@ uint16_t system_reset_cause(void)
 
 void system_reset(void)
 {
+    fault_reset_planned();
     __asm__ volatile("reset");
     while (1)
         ;

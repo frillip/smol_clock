@@ -5,8 +5,9 @@
  * Only the store's own pages can be written. They are reserved here, at a
  * fixed address apart from the application:
  *
- *   0x000000 - 0x0297FF  application (and the bootloader, and the
- *                        application's version and CRC trailer, to come)
+ *   0x000000 - 0x0297FF  the IPL, the SPL, the application and its
+ *                        version record (the SPL's pages written through
+ *                        flash_spl_*(), for the SPL writer only)
  *   0x029800 - 0x02A7FF  the store: FLASH_STORE_PAGES erase pages
  *   0x02A800 - 0x02AFFF  the last page: the configuration words from
  *                        0x02AFEC, and nothing else
@@ -93,6 +94,13 @@ FlashResult flash_erase_page(uint32_t address);
 // Writes two data words to the two instructions from address (a multiple
 // of 4, in the store, erased since it was last written).
 FlashResult flash_write_double_word(uint32_t address, uint16_t first, uint16_t second);
+
+// The SPL's pages (0x000800-0x001FFF, common/boot_layout.h), for the
+// application's SPL writer (esp/spl_writer.h), and nothing else: the guard
+// is the first thing each checks. Whole instruction words, 24 bits.
+uint32_t flash_read_instruction(uint32_t address);
+FlashResult flash_spl_erase_page(uint32_t address);
+FlashResult flash_spl_write(uint32_t address, uint32_t first, uint32_t second);
 
 // A free-running clock to time the operations with (pps_capture_timebase);
 // NULL: not timed.

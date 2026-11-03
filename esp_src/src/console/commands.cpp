@@ -9,6 +9,7 @@
 #include "../net/telnet.h"
 #include "../net/updater.h"
 #include "../net/wifi_link.h"
+#include "../pic/pic_boot.h"
 #include "../pic/pic_link.h"
 #include "../pic/pic_report.h"
 #include "../settings/user_prefs.h"
@@ -1063,13 +1064,34 @@ static void pic_action(Stream *output, const Entry *entry, const Value *value)
     }
 }
 
+// "pic boot": the SPL's report, or the application's version; run or hold.
+static void pic_boot_action(Stream *output, const Entry *entry, const Value *value)
+{
+    (void)entry;
+    if (value->choice == 0)
+    {
+        pic_boot_command(output, SML_BOOT_CMD_RUN);
+    }
+    else if (value->choice == 1)
+    {
+        pic_boot_command(output, SML_BOOT_CMD_HOLD);
+    }
+    else
+    {
+        pic_boot_print(output, value->verbose || verbose_setting);
+    }
+}
+
 static const Entry pic_entries[] = {
     {"stored", VALUE_NONE, NULL, 0, 0, "", "What the PIC has in flash", pic_action},
     {"save", VALUE_NONE, NULL, 0, 0, "", "Save the PIC's settings", pic_action},
     {"defaults", VALUE_NONE, NULL, 0, 0, "", "The PIC's default settings, not saved", pic_action},
     {"reset", VALUE_NONE, NULL, 0, 0, "", "Reset the PIC", pic_action},
     {"resync", VALUE_NONE, NULL, 0, 0, "", "Judge every source again and choose again", pic_action},
-    {"bootloader", VALUE_NONE, NULL, 0, 0, "", "Enter the bootloader (not yet)", pic_action},
+    {"bootloader", VALUE_NONE, NULL, 0, 0, "", "Enter the bootloader (the SPL)", pic_action},
+    {"boot", VALUE_OPTION, "run hold", 0, 0, "[run|hold]",
+     "The SPL's report; run: start the app; hold: stay in it",
+     pic_boot_action},
 };
 
 // ---- NTP, Wi-Fi, Telnet, updates ---------------------------------------------------
@@ -1290,9 +1312,13 @@ static void print_update_auto(Stream *output)
 
 static void bare_update(Stream *output, bool verbose)
 {
-    (void)verbose;
     output->printf("ESP %s%s%s\n", ESP_VERSION, updater_is_available() ? ", UPDATE AVAILABLE" : "",
                    updater_is_running() ? ", UPDATING" : "");
+    if (updater_pic_is_available())
+    {
+        output->printf("PIC: UPDATE AVAILABLE\n");
+    }
+    pic_boot_print_staged(output, verbose || verbose_setting);
     output->printf("update: https://%s%s, profile %s\n", user_prefs.fields.updater.server,
                    user_prefs.fields.updater.path,
                    user_prefs.fields.updater.config[0] != '\0' ? user_prefs.fields.updater.config
@@ -1302,19 +1328,48 @@ static void bare_update(Stream *output, bool verbose)
 
 static void update_action(Stream *output, const Entry *entry, const Value *value)
 {
+    (void)value;
     if (strcmp(entry->word, "check") == 0)
     {
         updater_check(output);
-    }
-    else if (value->choice == 0) // install force
-    {
-        updater_force(output);
     }
     else
     {
         updater_pull(output);
     }
 }
+
+// "update esp|pic|spl [force]": one part.
+static void update_part(Stream *output, const Entry *entry, const Value *value)
+{
+    bool force = value->choice == 0;
+
+    if (strcmp(entry->word, "esp") == 0)
+    {
+        updater_esp(output, force);
+    }
+    else if (strcmp(entry->word, "pic") == 0)
+    {
+        updater_pic(output, force);
+    }
+    else
+    {
+        updater_spl(output, force);
+    }
+}
+
+// "update erase pic|spl|all": the staged files.
+static void update_erase(Stream *output, const Entry *entry, const Value *value)
+{
+    (void)entry;
+    if (!value->given)
+    {
+        output->printf("update erase: pic, spl or all\n");
+        return;
+    }
+    pic_boot_erase(output, value->choice != 1, value->choice != 0);
+}
+
 
 static void update_text(Stream *output, const Entry *entry, const Value *value)
 {
@@ -1362,9 +1417,16 @@ static void update_auto(Stream *output, const Entry *entry, const Value *value)
 }
 
 static const Entry update_entries[] = {
-    {"check", VALUE_NONE, NULL, 0, 0, "", "Is there an update?", update_action},
-    {"install", VALUE_OPTION, "force", 0, 0, "[force]",
-     "Install (esp reset to finish); force: any version, restarts", update_action},
+    {"check", VALUE_NONE, NULL, 0, 0, "", "What is offered; stages the PIC's files",
+     update_action},
+    {"install", VALUE_NONE, NULL, 0, 0, "", "Everything due: ESP (restarts), SPL, PIC", update_action},
+    {"esp", VALUE_OPTION, "force", 0, 0, "[force]",
+     "The ESP if newer (esp reset); force: any version, restarts", update_part},
+    {"pic", VALUE_OPTION, "force", 0, 0, "[force]",
+     "The PIC's application if newer; force: any, or staged", update_part},
+    {"spl", VALUE_OPTION, "force", 0, 0, "[force]", "The PIC's SPL", update_part},
+    {"erase", VALUE_CHOICE, "pic spl all", 0, 0, "pic|spl|all", "Empty the staged files' slots",
+     update_erase},
     {"server", VALUE_TEXT, NULL, 0, 0, "<host>", "Update server", update_text},
     {"path", VALUE_TEXT, NULL, 0, 0, "<path>", "Update path", update_text},
     {"config", VALUE_TEXT, NULL, 0, 0, "<name>", "Update profile ('default' for none)",
@@ -1446,7 +1508,7 @@ static const Noun nouns[] = {
     {"ntp", "The ESP's NTP clock and servers", bare_ntp, ENTRIES(ntp_entries)},
     {"wifi", "Wi-Fi (never the passphrase)", bare_wifi, ENTRIES(wifi_entries)},
     {"telnet", "The telnet console", bare_telnet, ENTRIES(telnet_entries)},
-    {"update", "ESP firmware updates", bare_update, ENTRIES(update_entries)},
+    {"update", "Firmware updates: the ESP and the PIC", bare_update, ENTRIES(update_entries)},
     {"esp", "The ESP: version, uptime, settings", bare_esp, ENTRIES(esp_entries)},
 };
 

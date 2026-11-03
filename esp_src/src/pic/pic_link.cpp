@@ -58,6 +58,9 @@ static PicLinkStats stats;
 static Held held[HELD_MAX];
 static Pending pending[PENDING_MAX];
 static PicCommandHandler command_handler;
+static PicFrameHook frame_hook;
+static bool in_spl;
+static bool link_held; // pic_link_hold(): an SPL update waits on the application's flash
 static PicTime pic_time;
 static Settings settings;
 static uint16_t next_token = 1;
@@ -65,6 +68,7 @@ static uint32_t last_byte_ms;
 static uint32_t last_frame_ms;
 static uint32_t last_service_ms;
 static bool backlog; // this service found the loop had been held up
+static bool polling; // pic_link_poll(): commands from the PIC answered BUSY
 
 static Held *find_held(uint8_t class_id, uint8_t message_id, bool create)
 {
@@ -99,6 +103,11 @@ void pic_link_send(uint8_t class_id, uint8_t message_id, const void *native)
     uint8_t frame[SML_MAX_FRAME_BYTES];
     uint16_t length;
 
+    if ((in_spl || link_held) && class_id != SML_CLASS_BOOT)
+    {
+        stats.held_back++;
+        return;
+    }
     length = sml_frame_message(class_id, message_id, native, frame);
     if (length != 0)
     {
@@ -148,10 +157,37 @@ static Pending *take_slot(uint16_t command, uint32_t argument, Stream *reply_to,
     return slot;
 }
 
+void pic_link_send_wire(uint8_t class_id, uint8_t message_id, const uint8_t *payload,
+                        uint16_t length)
+{
+    uint8_t frame[SML_MAX_FRAME_BYTES];
+    uint16_t bytes = sml_frame(class_id, message_id, payload, length, frame);
+
+    if (bytes != 0)
+    {
+        uart.write(frame, bytes);
+        stats.sent++;
+    }
+}
+
+
 uint16_t pic_link_request(uint16_t command, uint32_t argument, Stream *reply_to, bool verbose)
 {
     SML_CMD_USER_PAYLOAD request;
-    Pending *slot = take_slot(command, argument, reply_to, verbose);
+    Pending *slot;
+
+    if (in_spl || link_held)
+    {
+        if (reply_to != NULL)
+        {
+            reply_to->printf(in_spl ? "PIC %s: not sent, the PIC is in its SPL (pic boot)\n"
+                                    : "PIC %s: not sent, the PIC's SPL is being written\n",
+                             pic_report_command_name(command));
+        }
+        stats.held_back++;
+        return 0;
+    }
+    slot = take_slot(command, argument, reply_to, verbose);
 
     memset(&request, 0, sizeof(request));
     request.command = command;
@@ -331,6 +367,11 @@ static void handle_command(const SML_CMD_USER_PAYLOAD *command)
     bool restart = false;
 
     stats.commands++;
+    if (polling)
+    {
+        respond(command->token, command->command, SML_RESULT_NACK, SML_ERROR_BUSY);
+        return;
+    }
     if (command->command >= SML_USER_ESP_FIRST && command_handler != NULL)
     {
         detail = SML_ERROR_NONE;
@@ -373,6 +414,13 @@ static void note_system(const SML_STAT_SYS_PAYLOAD *sys)
     static bool seen;
     static uint32_t last_uptime_s;
     char version[16];
+    char reset[48];
+
+    if (in_spl)
+    {
+        in_spl = false;
+        console_printf("PIC: out of its SPL\n");
+    }
 
     pic_report_version(version, sizeof(version), sys->pic_version);
     if (!seen || sys->uptime_s < last_uptime_s)
@@ -381,13 +429,33 @@ static void note_system(const SML_STAT_SYS_PAYLOAD *sys)
         {
             stats.restarts++;
         }
-        console_printf("%s: firmware %s, up %lu s, last reset: %s\n",
+        console_printf("%s: firmware %s, up %lu s, last reset: %s%s\n",
                        seen ? "PIC restarted" : "PIC", version, (unsigned long)sys->uptime_s,
-                       pic_report_reset_name(sys->reset_cause));
+                       pic_report_last_reset(sys, reset, sizeof(reset)),
+                       (sys->flags & SML_SYS_CLOCK_FALLBACK) != 0U
+                           ? "; CLOCK FALLBACK: the external clock did not start"
+                           : "");
     }
     seen = true;
     last_uptime_s = sys->uptime_s;
 }
+
+// BOOT-STATUS from the SPL: the link goes quiet, until STAT-SYS. Not for
+// the boot window after a reset: the SPL hands over by itself within the
+// second and writes nothing meanwhile, and the new application's link waits
+// for a frame before it says anything (an update in progress holds the SPL
+// itself, from pic_update.c).
+static void note_boot_status(const SML_BOOT_STATUS_PAYLOAD *status)
+{
+    if (status->mode == SML_BOOT_MODE_APP || status->mode == SML_BOOT_MODE_WINDOW || in_spl)
+    {
+        return;
+    }
+    in_spl = true;
+    stats.spl_entries++;
+    console_printf("PIC: in its SPL (%s)\n", pic_report_boot_mode_name(status->mode));
+}
+
 
 static void handle_frame(const SmlFrame *frame)
 {
@@ -396,6 +464,10 @@ static void handle_frame(const SmlFrame *frame)
 
     stats.frames++;
     last_frame_ms = millis();
+    if (frame_hook != NULL)
+    {
+        frame_hook(frame);
+    }
     if (message == NULL)
     {
         stats.unknown++;
@@ -442,6 +514,10 @@ static void handle_frame(const SmlFrame *frame)
     {
         note_settings((const SML_STAT_SETTINGS_PAYLOAD *)native);
     }
+    if (frame->class_id == SML_CLASS_BOOT && frame->message_id == SML_BOOT_STATUS)
+    {
+        note_boot_status((const SML_BOOT_STATUS_PAYLOAD *)native);
+    }
     Held *slot = find_held(frame->class_id, frame->message_id, true);
     if (slot != NULL)
     {
@@ -451,11 +527,43 @@ static void handle_frame(const SmlFrame *frame)
     }
 }
 
-// Text outside frames: the PIC's raw console output. Printable only.
+// Text outside frames: the PIC's raw console output, a whole line at a time.
+// A frame broken by bytes lost on the way (the UART's FIFO overruns while the
+// ESP's flash is erased or written, with its interrupt held off) comes here
+// too, as the parser gives its bytes back: its header (0xB5) and binary
+// payload mark the line, which is then dropped, not printed. So is a line
+// still unfinished when a whole frame arrives: the PIC sends its raw text only
+// while it sends no frames (in TEXT mode, or just started), and a line from it
+// can pause part-way (its start-up banner does, while it sets up) but is not
+// interrupted by a frame.
+// Terminal controls (the clear screen at the PIC's start) are left out:
+// ESC, then '[' and parameters up to a final byte from 0x40 to 0x7E.
+#define TEXT_LINE_BYTES 160U
+
+static uint8_t text_line[TEXT_LINE_BYTES];
+static uint16_t text_length;
+static bool text_bad;     // the line held a byte no console text has
+static bool text_pending; // a line is open
+
+static void end_line(bool complete)
+{
+    if (text_pending && complete && !text_bad && text_length != 0U)
+    {
+        console_write_text(text_line, text_length);
+        stats.text_bytes += text_length;
+    }
+    else if (text_pending)
+    {
+        stats.text_dropped++;
+    }
+    text_length = 0;
+    text_bad = false;
+    text_pending = false;
+}
+
 static void on_text(const uint8_t *text, uint16_t length, void *context)
 {
-    uint8_t out[SML_MAX_FRAME_BYTES + 1];
-    uint16_t kept = 0;
+    static uint8_t escape; // 0: none; 1: after ESC; 2: in a control sequence
     uint16_t index;
 
     (void)context;
@@ -463,21 +571,53 @@ static void on_text(const uint8_t *text, uint16_t length, void *context)
     {
         uint8_t c = text[index];
 
-        if ((c >= 0x20 && c < 0x7F) || c == '\r' || c == '\n' || c == '\t')
+        text_pending = true;
+        if (c == 0x1B)
         {
-            out[kept++] = c;
+            escape = 1;
+            continue;
         }
-    }
-    if (kept != 0)
-    {
-        console_write_text(out, kept);
-        stats.text_bytes += kept;
+        if (escape == 1)
+        {
+            escape = c == '[' ? 2 : 0;
+            continue;
+        }
+        if (escape == 2)
+        {
+            if (c >= 0x40 && c <= 0x7E)
+            {
+                escape = 0;
+            }
+            else if (c < 0x20 || c > 0x3F)
+            {
+                escape = 0; // not a control sequence after all
+                text_bad = true;
+            }
+            continue;
+        }
+        if ((c >= 0x20 && c < 0x7F) || c == '\r' || c == '\t' || c == '\n')
+        {
+            text_line[text_length++] = c;
+            if (c == '\n' || text_length == TEXT_LINE_BYTES)
+            {
+                end_line(true);
+            }
+        }
+        else
+        {
+            text_bad = true;
+        }
     }
 }
 
 static void on_frame(const SmlFrame *frame, void *context)
 {
     (void)context;
+    if (text_pending)
+    {
+        text_bad = true; // a broken frame's bytes, before this one
+        end_line(false);
+    }
     handle_frame(frame);
 }
 
@@ -522,9 +662,48 @@ void pic_link_service(void)
     expire_requests();
 }
 
+void pic_link_poll(void)
+{
+    if (polling)
+    {
+        return;
+    }
+    polling = true;
+    pic_link_service();
+    polling = false;
+}
+
 void pic_link_set_command_handler(PicCommandHandler handler)
 {
     command_handler = handler;
+}
+
+
+void pic_link_set_frame_hook(PicFrameHook hook)
+{
+    frame_hook = hook;
+}
+
+
+void pic_link_hold(bool on)
+{
+    link_held = on;
+}
+
+
+void pic_link_left_spl(const char *why)
+{
+    if (in_spl)
+    {
+        in_spl = false;
+        console_printf("PIC: out of its SPL (%s)\n", why);
+    }
+}
+
+
+bool pic_link_in_spl(void)
+{
+    return in_spl;
 }
 
 bool pic_link_is_sml(void)

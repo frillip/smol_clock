@@ -3,6 +3,10 @@
  * Draft for manual review. Payloads other than TIME-AUTH are provisional.
  * Specification: common/SML_PROTOCOL.md. This header is the single shared
  * copy for the dsPIC and the ESP32; do not fork it.
+ * 2026-11-02 (2.5): class 0xF0 BOOT defined: BOOT-STATUS, BOOT-COMMAND,
+ * BOOT-RESPONSE, BOOT-DATA, BOOT-DATA-RESPONSE, BOOT-VERIFY,
+ * BOOT-VERIFY-RESPONSE. SML_ERROR_CRC and SML_ERROR_NOT_BLANK.
+ * Layouts may hold byte strings (sml.h). No existing layout changes.
  * 2026-10-28 (2.3): SML_MENU_* menu_state values: the V2+ menu.
  * 2026-10-28 (2.2): SML_SETTING_DELTA_LOCAL and SML_UI_DELTA_LOCAL: the delta
  * epoch as a local wall-clock time.
@@ -41,7 +45,7 @@
  * Check("123456789")=29B1. Coverage includes magic through final payload byte.
  *
  * Normal payload maximum 240. Normal state payload minimum 8. Commands,
- * responses and debug text may be shorter. Bootloader definitions are deferred.
+ * responses and debug text may be shorter.
  * All age_ms fields are uint16_t, saturating at 65535 ms (never wrapping).
  * Validity follows existing timeouts; saturation does not imply validity.
  * NTP update age can saturate normally for long polling intervals; last_update
@@ -64,7 +68,7 @@
 #define SML_TZ_TRANSITION_MAX 8U
 #define SML_SETTINGS_SCHEMA   1U
 #define SML_PROTOCOL_MAJOR    2U
-#define SML_PROTOCOL_MINOR    4U
+#define SML_PROTOCOL_MINOR    7U
 
 #define SML_CLASS_TIME 0x10U
 #define SML_CLASS_TZ   0x20U
@@ -94,7 +98,7 @@
 #define SML_CMD_USER      0x10U // SML-CMD-USER
 #define SML_CMD_RESPONSE  0x20U // SML-CMD-RESPONSE
 #define SML_CMD_SETTINGS  0x30U // SML-CMD-SETTINGS
-// Bootloader class/IDs reserved; payloads deferred.
+#define SML_BOOT_STATUS          0x01U // SML-BOOT-STATUS
 #define SML_BOOT_COMMAND         0x10U // SML-BOOT-COMMAND
 #define SML_BOOT_RESPONSE        0x20U // SML-BOOT-RESPONSE
 #define SML_BOOT_DATA            0x50U // SML-BOOT-DATA
@@ -377,6 +381,14 @@
 #define SML_CMD_USER_BYTES      10U
 #define SML_CMD_RESPONSE_BYTES  12U
 #define SML_CMD_SETTINGS_BYTES  38U
+#define SML_BOOT_STATUS_BYTES          56U
+#define SML_BOOT_COMMAND_BYTES         32U
+#define SML_BOOT_RESPONSE_BYTES        12U
+#define SML_BOOT_CHUNK_BYTES           192U // 64 instructions, 3 bytes each
+#define SML_BOOT_DATA_BYTES            204U
+#define SML_BOOT_DATA_RESPONSE_BYTES   12U
+#define SML_BOOT_VERIFY_BYTES          8U
+#define SML_BOOT_VERIFY_RESPONSE_BYTES 204U
 
 #pragma pack(push, 1)
 typedef struct
@@ -897,15 +909,35 @@ typedef struct
  * second after reset, and a drop means the PIC restarted.
  * pic_version: major << 16 | minor << 8 | patch, as esp_version.
  * loop_max_ms: the longest pass of the PIC's main loop since the previous
- * STAT-SYS (normally the last second): work that held everything else up. */
+ * STAT-SYS (normally the last second): work that held everything else up.
+ * flags SML_SYS_FAULT: the last reset was a fault the PIC recorded, and
+ * fault says which: SML_FAULT_* << 8 | SML_TRAP_* (SML 2.6).
+ * flags SML_SYS_CLOCK_FALLBACK: the external clock did not start, and the
+ * PIC runs from its internal oscillator, at about the right rate but only as
+ * accurate as that (SML 2.7). */
+#define SML_SYS_FAULT          0x0001U
+#define SML_SYS_CLOCK_FALLBACK 0x0002U
+
+#define SML_FAULT_WATCHDOG 1U // the watchdog: the main loop or the epoch stopped
+#define SML_FAULT_TRAP     2U // a trap, below
+
+// Traps, in the order of their vectors from 1.
+#define SML_TRAP_OSCILLATOR 1U
+#define SML_TRAP_ADDRESS    2U
+#define SML_TRAP_HARD       3U
+#define SML_TRAP_STACK      4U
+#define SML_TRAP_MATH       5U
+#define SML_TRAP_DMA        6U
+#define SML_TRAP_SOFT       7U
+
 typedef struct
 {
-    uint16_t flags; // reserved; transmit zero
+    uint16_t flags; // SML_SYS_*
     uint16_t reset_cause;
     uint32_t uptime_s;
     uint32_t pic_version;
     uint16_t loop_max_ms;
-    uint16_t reserved;
+    uint16_t fault; // SML_FAULT_* << 8 | SML_TRAP_*, with SML_SYS_FAULT; else zero
 } SML_STAT_SYS_PAYLOAD;
 
 /* Shared settings body. No EEPROM marker/checksum or action/reset flags.
@@ -975,6 +1007,8 @@ typedef struct
 #define SML_ERROR_STORAGE        7U
 #define SML_ERROR_VERIFY         8U
 #define SML_ERROR_STATE          9U
+#define SML_ERROR_CRC            10U // BOOT-DATA: the chunk's CRC-32 is wrong; send it again
+#define SML_ERROR_NOT_BLANK      11U // BOOT-DATA: flash neither erased nor identical
 
 // SML-CMD-USER, both ways. Codes below 0x8000 run on the PIC (sent by the ESP),
 // 0x8000 and up on the ESP (sent by the PIC, e.g. from its menu). The wrong
@@ -1050,6 +1084,155 @@ typedef struct
     SML_SETTINGS_BODY settings;
 } SML_CMD_SETTINGS_PAYLOAD;
 
+/* ---- Class 0xF0 BOOT (2.5) ------------------------------------------------
+ * The bootloader messages
+ * Answered by the SPL for regions APP and TEST, and by the application for region
+ * SPL; the SPL ignores every other class. One request at a time.
+ * Flash layout, records and the mailbox: common/boot_layout.h. */
+#define SML_BOOT_PROTOCOL 1U
+#define SML_BOOT_CHUNK_INSTRUCTIONS 64U // 0x80 program address units
+// Regions (BOOT-COMMAND, BOOT-DATA region).
+#define SML_BOOT_REGION_APP  0U // 0x002000-0x028FFF and its record: the SPL writes it
+#define SML_BOOT_REGION_SPL  1U // 0x000800-0x001F7F and its record: the application writes it
+#define SML_BOOT_REGION_TEST 2U // 0x028800-0x028F7F, record 0x028F80: the SPL, while free
+// BOOT-COMMAND command.
+#define SML_BOOT_CMD_STATUS  0x01U // BOOT-STATUS, then ACK. SPL and application
+#define SML_BOOT_CMD_HOLD    0x02U // ACK; stay in the SPL until RUN. SPL
+#define SML_BOOT_CMD_ERASE   0x03U // key ERASE; ACCEPTED, then ACK (value: pages)
+#define SML_BOOT_CMD_COMMIT  0x04U // key COMMIT; ACCEPTED, then ACK
+#define SML_BOOT_CMD_RUN     0x05U // ACK, then the application. SPL
+#define SML_BOOT_CMD_RESET   0x06U // ACK, then a software reset. SPL
+#define SML_BOOT_CMD_CONFIRM 0x07U // key COMMIT; confirm the booted SPL. Application
+#define SML_BOOT_KEY_ERASE   0x45524153UL // "ERAS"
+#define SML_BOOT_KEY_COMMIT  0x434F4D4DUL // "COMM"
+// BOOT-STATUS mode.
+#define SML_BOOT_MODE_WINDOW 0U // the boot window: hands over unless HOLD
+#define SML_BOOT_MODE_HELD   1U // stays until RUN
+#define SML_BOOT_MODE_NO_APP 2U // no valid application: waits
+#define SML_BOOT_MODE_LOOP   3U // the boot-loop guard: waits
+#define SML_BOOT_MODE_APP    4U // the application is answering
+// BOOT-STATUS flags.
+#define SML_BOOT_FLAG_RECORD    0x0001U // application record present, its CRC good
+#define SML_BOOT_FLAG_COMMITTED 0x0002U
+#define SML_BOOT_FLAG_CHECKING  0x0004U // the image CRC-32 not computed yet
+#define SML_BOOT_FLAG_IMAGE_OK  0x0008U // the image CRC-32 matches: valid
+#define SML_BOOT_FLAG_ERASED    0x0010U // erased in this session, the region last erased
+#define SML_BOOT_FLAG_REQUESTED 0x0020U // entered on the application's request
+#define SML_BOOT_FLAG_POWER_ON  0x0040U // RCON POR or BOR
+#define SML_BOOT_FLAG_TEST_FREE 0x0080U // the application does not reach the test page
+// BOOT-STATUS boot: how this start came about, the mailbox's boot word
+// (BOOT_PATH_* in boot_layout.h, the same bits).
+#define SML_BOOT_PATH_APP_DIRECT   0x01U // the IPL started the application itself
+#define SML_BOOT_PATH_UNCONFIRMED  0x02U // an unconfirmed SPL was started
+#define SML_BOOT_PATH_NO_SPL       0x04U // the SPL is not intact
+#define SML_BOOT_PATH_SPL_GIVEN_UP 0x08U // the SPL is rejected or out of trials
+#define SML_BOOT_PATH_LAST_RESORT  0x10U // the SPL started despite that: no application
+#define SML_BOOT_PATH_SPL_HUNG     0x20U // the last reset was the watchdog's in the SPL
+// BOOT-STATUS spl_state.
+#define SML_SPL_STATE_RECORD    0x01U // record present, its CRC good
+#define SML_SPL_STATE_COMMITTED 0x02U
+#define SML_SPL_STATE_INTACT    0x04U // the code's CRC-32 matches
+#define SML_SPL_STATE_CONFIRMED 0x08U
+#define SML_SPL_STATE_REJECTED  0x10U
+
+/* SML-BOOT-STATUS, PIC->ESP: the SPL on entry, every second while idle and
+ * before the ACK to STATUS; the application before the ACK to STATUS only. */
+typedef struct
+{
+    uint32_t spl_version;    // from the SPL record (major << 16 | minor << 8 | patch), else 0
+    uint8_t protocol;        // SML_BOOT_PROTOCOL
+    uint8_t mode;            // SML_BOOT_MODE_*
+    uint16_t flags;          // SML_BOOT_FLAG_*
+    uint16_t reset_cause;    // RCON as found (SML_RESET_*)
+    uint16_t window_ms;      // left of the boot window (WINDOW), else 0
+    uint32_t device_id;      // DEVID
+    uint32_t region_start;   // 0x002000
+    uint32_t region_end;     // 0x029000, exclusive
+    uint32_t app_version;    // from the application record (RECORD), else 0
+    uint32_t app_length;     // instructions
+    uint32_t app_crc32;      // from the record
+    uint32_t crc32_computed; // over app_length (not while CHECKING); the record's in APP
+    uint32_t build_time;     // from the record, Unix seconds
+    uint8_t attempts;        // hand-overs since the application last reported healthy
+    uint8_t boot;            // SML_BOOT_PATH_*
+    uint16_t ipl_version;    // major << 8 | minor
+    uint8_t spl_state;       // SML_SPL_STATE_*
+    uint8_t trials;          // starts of an unconfirmed SPL, or a confirmed one's hangs in a row
+    uint16_t healthy_s;      // the application: seconds healthy, saturating; the SPL: 0
+    uint32_t spl_crc32;      // from the SPL record
+} SML_BOOT_STATUS_PAYLOAD;
+
+/* SML-BOOT-COMMAND, ESP->PIC. args: COMMIT's record fields; zero otherwise.
+ * For APP and TEST, version is the application's and extra its SML version
+ * (major << 8 | minor); for SPL, the SPL's and its bootloader protocol. */
+typedef struct
+{
+    uint32_t version;
+    uint32_t start;  // APP 0x002000, TEST 0x028800, SPL 0x000800
+    uint32_t length; // instructions, even
+    uint32_t crc32;  // of the packed image
+    uint32_t build_time;
+    uint16_t extra;
+    uint16_t reserved;
+} SML_BOOT_COMMIT_ARGS;
+typedef struct
+{
+    uint16_t token;  // the ESP's, echoed
+    uint8_t command; // SML_BOOT_CMD_*
+    uint8_t region;  // SML_BOOT_REGION_*; 0 for commands without one
+    uint32_t key;    // SML_BOOT_KEY_ERASE, SML_BOOT_KEY_COMMIT (COMMIT, CONFIRM), else 0
+    SML_BOOT_COMMIT_ARGS args;
+} SML_BOOT_COMMAND_PAYLOAD;
+
+// SML-BOOT-RESPONSE, PIC->ESP: SML_RESULT_* and SML_ERROR_*.
+typedef struct
+{
+    uint16_t status;
+    uint16_t detail;
+    uint16_t token;
+    uint8_t command;
+    uint8_t region;
+    uint32_t value; // ERASE: pages erased; COMMIT NACK VERIFY: the CRC-32 computed
+} SML_BOOT_RESPONSE_PAYLOAD;
+
+/* SML-BOOT-DATA, ESP->PIC: one chunk, written once into erased flash (an
+ * identical chunk is ACKed again). data: 64 instructions, 3 bytes each,
+ * least significant first. */
+typedef struct
+{
+    uint32_t address; // a multiple of 0x80 within the region
+    uint8_t region;
+    uint8_t reserved[3];
+    uint32_t crc32; // CRC-32 of data
+    uint8_t data[SML_BOOT_CHUNK_BYTES];
+} SML_BOOT_DATA_PAYLOAD;
+
+// SML-BOOT-DATA-RESPONSE, PIC->ESP.
+typedef struct
+{
+    uint16_t status; // ACK or NACK
+    uint16_t detail;
+    uint32_t address;
+    uint32_t crc32; // of the chunk as now in flash (ACK)
+} SML_BOOT_DATA_RESPONSE_PAYLOAD;
+
+// SML-BOOT-VERIFY, ESP->PIC: any chunk below 0x029800, at any time.
+typedef struct
+{
+    uint32_t address;
+    uint32_t reserved;
+} SML_BOOT_VERIFY_PAYLOAD;
+
+// SML-BOOT-VERIFY-RESPONSE, PIC->ESP: the chunk read from flash.
+typedef struct
+{
+    uint16_t status; // ACK, or NACK ARGUMENT
+    uint16_t detail;
+    uint32_t address;
+    uint32_t crc32; // of data
+    uint8_t data[SML_BOOT_CHUNK_BYTES];
+} SML_BOOT_VERIFY_RESPONSE_PAYLOAD;
+
 #pragma pack(pop)
 
 // C11/C++11 checks; also work with older XC16 language modes.
@@ -1079,5 +1262,12 @@ SML_SIZE_CHECK(SML_STAT_SYS_PAYLOAD, SML_STAT_SYS_BYTES);
 SML_SIZE_CHECK(SML_CMD_USER_PAYLOAD, SML_CMD_USER_BYTES);
 SML_SIZE_CHECK(SML_CMD_RESPONSE_PAYLOAD, SML_CMD_RESPONSE_BYTES);
 SML_SIZE_CHECK(SML_CMD_SETTINGS_PAYLOAD, SML_CMD_SETTINGS_BYTES);
+SML_SIZE_CHECK(SML_BOOT_STATUS_PAYLOAD, SML_BOOT_STATUS_BYTES);
+SML_SIZE_CHECK(SML_BOOT_COMMAND_PAYLOAD, SML_BOOT_COMMAND_BYTES);
+SML_SIZE_CHECK(SML_BOOT_RESPONSE_PAYLOAD, SML_BOOT_RESPONSE_BYTES);
+SML_SIZE_CHECK(SML_BOOT_DATA_PAYLOAD, SML_BOOT_DATA_BYTES);
+SML_SIZE_CHECK(SML_BOOT_DATA_RESPONSE_PAYLOAD, SML_BOOT_DATA_RESPONSE_BYTES);
+SML_SIZE_CHECK(SML_BOOT_VERIFY_PAYLOAD, SML_BOOT_VERIFY_BYTES);
+SML_SIZE_CHECK(SML_BOOT_VERIFY_RESPONSE_PAYLOAD, SML_BOOT_VERIFY_RESPONSE_BYTES);
 #undef SML_SIZE_CHECK
 #endif

@@ -19,6 +19,7 @@ static SchedulerTask *tasks;   // every task seen, in order of first use
 static SchedulerTask *running; // timed until the next call in
 static uint32_t running_since_ms;
 static uint32_t report_start_ms;
+static SchedulerTaskHook task_hook; // told what runs: the fault record's
 
 static void enrol(SchedulerTask *task)
 {
@@ -48,6 +49,10 @@ static void stop_running(void)
             running->busy_max = busy > UINT16_MAX ? UINT16_MAX : (uint16_t)busy;
         }
         running = NULL;
+        if (task_hook != NULL)
+        {
+            task_hook("loop");
+        }
     }
 }
 
@@ -57,6 +62,10 @@ static void start_running(SchedulerTask *task)
     task->runs++;
     running = task;
     running_since_ms = epoch_timer_ms();
+    if (task_hook != NULL)
+    {
+        task_hook(task->name);
+    }
 }
 
 
@@ -98,6 +107,12 @@ static bool slot_due(SchedulerTask *task)
     task->missed += epochs - 1U;
     task->last_epoch = epoch;
     return true;
+}
+
+
+void scheduler_set_task_hook(SchedulerTaskHook hook)
+{
+    task_hook = hook;
 }
 
 

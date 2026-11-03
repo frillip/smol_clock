@@ -1,15 +1,2 @@
-/dspic_bootloader/nbproject/
-/dspic_bootloader/dist/
-/dspic_bootloader/build/
-/dspic_bootloader/debug/
-/dspic_bootloader/mcc_generated_files/docs/
-/dspic_bootloader/.generated_files/
-/dspic_bootloader/Makefile
-/dspic_bootloader/mcc-manifest*
-/dspic_bootloader/defmplabxtrace*
-/tzinfo_service/GeoLite2*
-/tzinfo_service/*.mmdb
-/tzinfo_service/*.log
-/tzinfo_service/*.tar.gz
-/tzinfo_service/.venv/
 __pycache__/
+/dist/

@@ -63,9 +63,16 @@ const char *pic_report_error_name(uint16_t error)
 {
     static const char *const names[] = {"none",   "unsupported",    "length", "argument",
                                         "busy",   "stale revision", "schema", "storage",
-                                        "verify", "state"};
+                                        "verify", "state",          "CRC",    "not blank"};
 
-    return error < 10 ? names[error] : "?";
+    return error < sizeof(names) / sizeof(names[0]) ? names[error] : "?";
+}
+
+const char *pic_report_boot_mode_name(uint8_t mode)
+{
+    static const char *const names[] = {"WINDOW", "HELD", "NO_APP", "LOOP", "APP"};
+
+    return mode < sizeof(names) / sizeof(names[0]) ? names[mode] : "?";
 }
 
 const char *pic_report_source_name(uint8_t source)
@@ -119,6 +126,28 @@ const char *pic_report_reset_name(uint16_t cause)
         }
     }
     return "unknown";
+}
+
+const char *pic_report_last_reset(const SML_STAT_SYS_PAYLOAD *sys, char *text, size_t size)
+{
+    static const char *const traps[] = {"?",     "OSCILLATOR", "ADDRESS", "HARD",
+                                        "STACK", "MATH",       "DMA",     "SOFT"};
+    uint8_t kind = (uint8_t)(sys->fault >> 8);
+    uint8_t trap = (uint8_t)(sys->fault & 0xFFU);
+
+    if ((sys->flags & SML_SYS_FAULT) != 0U && kind == SML_FAULT_TRAP)
+    {
+        snprintf(text, size, "%s trap", trap < 8U ? traps[trap] : "?");
+    }
+    else if ((sys->flags & SML_SYS_FAULT) != 0U && kind == SML_FAULT_WATCHDOG)
+    {
+        snprintf(text, size, "watchdog");
+    }
+    else
+    {
+        snprintf(text, size, "%s", pic_report_reset_name(sys->reset_cause));
+    }
+    return text;
 }
 
 void pic_report_version(char *text, size_t size, uint32_t version)
@@ -203,6 +232,7 @@ static void print_system(Stream *output, bool verbose)
 {
     SML_STAT_SYS_PAYLOAD sys;
     char version[16];
+    char reset[48];
 
     if (!pic_link_get(SML_CLASS_STAT, SML_STAT_SYS, &sys, 30000U))
     {
@@ -217,7 +247,8 @@ static void print_system(Stream *output, bool verbose)
     {
         output->printf("PIC:      %s, up ", version);
         time_print_duration(output, sys.uptime_s);
-        output->printf(", last reset: %s\n", pic_report_reset_name(sys.reset_cause));
+        output->printf(", last reset: %s%s\n", pic_report_last_reset(&sys, reset, sizeof(reset)),
+                       (sys.flags & SML_SYS_CLOCK_FALLBACK) != 0U ? ", CLOCK FALLBACK" : "");
         return;
     }
     output->printf("\n=== PIC system ===\n");
@@ -225,9 +256,14 @@ static void print_system(Stream *output, bool verbose)
     output->printf("Up:       ");
     time_print_duration(output, sys.uptime_s);
     output->printf(", %lu restarts seen\n", (unsigned long)pic_link_stats()->restarts);
-    output->printf("Reset:    %s (0x%04X)\n", pic_report_reset_name(sys.reset_cause),
+    output->printf("Reset:    %s (0x%04X)\n", pic_report_last_reset(&sys, reset, sizeof(reset)),
                    sys.reset_cause);
     output->printf("Loop:     longest pass %u ms in the last second\n", sys.loop_max_ms);
+    if ((sys.flags & SML_SYS_CLOCK_FALLBACK) != 0U)
+    {
+        output->printf("Clock:    FALLBACK: the external clock did not start, on the internal "
+                       "oscillator\n");
+    }
 }
 
 // Compact: "UTC:      <UTC> +/-120 ns, GNSS LOCKED" and the local time.
@@ -618,6 +654,8 @@ void pic_report_print_link(Stream *output)
     output->printf("Parser: %lu noise bytes, %lu CRC errors, %lu length errors, %lu timeouts\n",
                    (unsigned long)parser->noise_bytes, (unsigned long)parser->crc_errors,
                    (unsigned long)parser->length_errors, (unsigned long)parser->timeouts);
+    output->printf("Text:   %lu bytes printed, %lu lines dropped (broken frames, unfinished)\n",
+                   (unsigned long)stats->text_bytes, (unsigned long)stats->text_dropped);
     output->printf("Commands: %lu to the PIC, %lu answered, %lu unanswered; %lu from it\n",
                    (unsigned long)stats->requests, (unsigned long)stats->responses,
                    (unsigned long)stats->unanswered, (unsigned long)stats->commands);

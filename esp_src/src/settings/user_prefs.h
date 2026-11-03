@@ -58,7 +58,9 @@
 
 // OTA updates
 #define UPDATER_SERVER_DEFAULT       "rubidium.darksky.io"
-#define UPDATER_PATH_DEFAULT         "/smol_clock/v2plus/update.json"
+#define UPDATER_PATH_DEFAULT         "/smol_clock/v2plus/manifest.json"
+// The format 1 manifest, removed: a stored path equal to it becomes the default.
+#define UPDATER_PATH_FORMAT_1        "/smol_clock/v2plus/update.json"
 #define UPDATER_CONFIG_DEFAULT       ""
 #define UPDATER_AUTO_ENABLED_DEFAULT 1
 #define UPDATER_AUTO_HOUR_DEFAULT    4

@@ -99,6 +99,13 @@ static unsigned repair(Stream *output)
            user_prefs_set_string(p->fields.updater.server, UPDATER_SERVER_DEFAULT));
     REPAIR(string_ok(p->fields.updater.path) && p->fields.updater.path[0] == '/', "updater.path",
            user_prefs_set_string(p->fields.updater.path, UPDATER_PATH_DEFAULT));
+    if (strcmp(p->fields.updater.path, UPDATER_PATH_FORMAT_1) == 0)
+    {
+        output->printf("Settings: updater.path %s, now %s (manifest format 2)\n",
+                       UPDATER_PATH_FORMAT_1, UPDATER_PATH_DEFAULT);
+        user_prefs_set_string(p->fields.updater.path, UPDATER_PATH_DEFAULT);
+        repaired++;
+    }
     REPAIR(string_ok(p->fields.updater.config), "updater.config",
            user_prefs_set_string(p->fields.updater.config, UPDATER_CONFIG_DEFAULT));
     REPAIR(p->fields.updater.flags.auto_time <= UPDATER_AUTO_HOUR_MAX, "updater.auto_time",

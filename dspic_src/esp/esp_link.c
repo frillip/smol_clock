@@ -8,6 +8,8 @@
 #include "../console/debug.h"
 #include "../drivers/pcf8563.h"
 #include "../drivers/uart1.h"
+#include "../drivers/boot_image.h"
+#include "../platform/boot.h"
 #include "../platform/system.h"
 #include "../platform/time_ms.h"
 #include "../settings/settings.h"
@@ -16,6 +18,7 @@
 #include "../sync/sync.h"
 #include "../ui/timezone.h"
 #include "esp_report.h"
+#include "spl_writer.h"
 
 static SmlParser parser;
 static EspLinkStats stats;
@@ -99,6 +102,12 @@ static void send_frame(const uint8_t *frame, uint16_t length)
 void esp_link_send(uint8_t class_id, uint8_t message_id, const void *native)
 {
     send_frame(tx_frame, sml_frame_message(class_id, message_id, native, tx_frame));
+}
+
+
+void esp_link_send_boot(uint8_t message_id, const uint8_t *payload, uint16_t length)
+{
+    send_frame(tx_frame, sml_frame(SML_CLASS_BOOT, message_id, payload, length, tx_frame));
 }
 
 
@@ -358,6 +367,26 @@ static uint8_t set_rtc(uint32_t utc_seconds)
 
 // Applies a command. Returns the error code, SML_ERROR_NONE for an ACK (or,
 // with accepted set, for ACCEPTED: the final answer comes later).
+/* ENTER_BOOTLOADER: a request for the SPL in the mailbox, then a reset once
+ * the ACK is out; the SPL starts HELD. Refused while a save is pending
+ * or the SPL is being written (BUSY), and when there is no SPL to stay in (STATE): the IPL would only
+ * start the application again. */
+static uint8_t enter_bootloader(bool *reset)
+{
+    if (settings_save_pending() || spl_writer_busy())
+    {
+        return SML_ERROR_BUSY;
+    }
+    if (!boot_mailbox_valid() || !boot_image_spl_usable())
+    {
+        return SML_ERROR_STATE;
+    }
+    boot_request_spl();
+    *reset = true;
+    return SML_ERROR_NONE;
+}
+
+
 static uint8_t run_command(const SML_CMD_USER_PAYLOAD *command, uint32_t now_ms, bool *reset,
                            bool *accepted)
 {
@@ -398,7 +427,8 @@ static uint8_t run_command(const SML_CMD_USER_PAYLOAD *command, uint32_t now_ms,
         case SML_USER_SET_DEBUG: return change_debug(argument);
         case SML_USER_RESYNC: sync_resync(); return SML_ERROR_NONE;
         case SML_USER_RESET: *reset = true; return SML_ERROR_NONE;
-        default: return SML_ERROR_UNSUPPORTED; // ENTER_BOOTLOADER: not yet
+        case SML_USER_ENTER_BOOTLOADER: return enter_bootloader(reset);
+        default: return SML_ERROR_UNSUPPORTED;
     }
 }
 
@@ -484,6 +514,14 @@ static void handle_frame(const SmlFrame *frame, uint32_t now_ms)
 
     stats.received++;
     esp_link_set_sml(); // any valid frame: the ESP speaks SML
+    if (frame->class_id == SML_CLASS_BOOT)
+    {
+        // The bootloader's messages, wire payloads (esp/spl_writer.h).
+        spl_writer_frame(frame->message_id, frame->payload, frame->length);
+        stats.boot_frames++;
+        stats.handled++;
+        return;
+    }
     if (message == NULL)
     {
         stats.unknown++;

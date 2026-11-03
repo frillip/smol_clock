@@ -18,10 +18,12 @@
         <itemPath>drivers/flash.h</itemPath>
         <itemPath>drivers/buzzer.h</itemPath>
         <itemPath>drivers/veml6040.h</itemPath>
+        <itemPath>drivers/boot_image.h</itemPath>
       </logicalFolder>
       <logicalFolder name="esp" displayName="esp" projectFiles="true">
         <itemPath>esp/esp_link.h</itemPath>
         <itemPath>esp/esp_report.h</itemPath>
+        <itemPath>esp/spl_writer.h</itemPath>
         <itemPath>../common/sml_proto.h</itemPath>
         <itemPath>../common/sml.h</itemPath>
       </logicalFolder>
@@ -43,6 +45,10 @@
         <itemPath>platform/system.h</itemPath>
         <itemPath>platform/time_ms.h</itemPath>
         <itemPath>platform/utc.h</itemPath>
+        <itemPath>platform/boot.h</itemPath>
+        <itemPath>platform/fault.h</itemPath>
+        <itemPath>../common/boot_layout.h</itemPath>
+        <itemPath>../common/boot_crc.h</itemPath>
         <itemPath>../common/enums.h</itemPath>
         <itemPath>platform/version.h</itemPath>
       </logicalFolder>
@@ -92,6 +98,7 @@
     <logicalFolder name="LinkerScript"
                    displayName="Linker Files"
                    projectFiles="true">
+      <itemPath>app.gld</itemPath>
     </logicalFolder>
     <logicalFolder name="SourceFiles"
                    displayName="Source Files"
@@ -110,11 +117,14 @@
         <itemPath>drivers/flash.c</itemPath>
         <itemPath>drivers/buzzer.c</itemPath>
         <itemPath>drivers/veml6040.c</itemPath>
+        <itemPath>drivers/boot_image.c</itemPath>
       </logicalFolder>
       <logicalFolder name="esp" displayName="esp" projectFiles="true">
         <itemPath>esp/esp_link.c</itemPath>
         <itemPath>esp/esp_report.c</itemPath>
         <itemPath>../common/sml.c</itemPath>
+        <itemPath>../common/boot_crc.c</itemPath>
+        <itemPath>esp/spl_writer.c</itemPath>
       </logicalFolder>
       <logicalFolder name="gnss" displayName="gnss" projectFiles="true">
         <itemPath>gnss/gnss.c</itemPath>
@@ -131,6 +141,10 @@
         <itemPath>platform/board.c</itemPath>
         <itemPath>platform/system.c</itemPath>
         <itemPath>platform/utc.c</itemPath>
+        <itemPath>platform/boot.c</itemPath>
+        <itemPath>platform/fault.c</itemPath>
+        <itemPath>platform/app_vectors.s</itemPath>
+        <itemPath>platform/traps.s</itemPath>
       </logicalFolder>
       <logicalFolder name="settings" displayName="settings" projectFiles="true">
         <itemPath>settings/settings.c</itemPath>

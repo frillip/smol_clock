@@ -39,7 +39,7 @@ typedef struct
     uint8_t message_id;
     uint8_t length;        // payload bytes; 0: variable (STAT-DEBUG)
     uint8_t direction;     // SML_FROM_*
-    const uint8_t *layout; // field sizes (1, 2 or 4) in order, 0-terminated
+    const uint8_t *layout; // field sizes in order, 0-terminated: 2 and 4 integers, else bytes
     const char *name;      // "TIME-AUTH", ...
 } SmlMessage;
 
@@ -71,6 +71,7 @@ typedef struct
 uint16_t sml_crc(uint16_t crc, const uint8_t *data, uint16_t length);
 
 // The table entry for a class and ID, or NULL if the message is unknown.
+// Not built with SML_NO_MESSAGES (the SPL), nor is sml_frame_message().
 const SmlMessage *sml_message(uint8_t class_id, uint8_t message_id);
 // Every known message, for diagnostics and tests.
 const SmlMessage *sml_messages(uint8_t *count);

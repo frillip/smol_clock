@@ -1,15 +1,19 @@
 #include "esp_report.h"
+#include "spl_writer.h"
 
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "../drivers/boot_image.h"
 #include "../drivers/i2c1.h"
 #include "../drivers/pcf8563.h"
 #include "../drivers/tubes.h"
 #include "../drivers/veml6040.h"
 #include "../gnss/gnss.h"
 #include "../menu/menu.h"
+#include "../platform/boot.h"
+#include "../platform/fault.h"
 #include "../platform/system.h"
 #include "../platform/time_ms.h"
 #include "../platform/version.h"
@@ -686,6 +690,109 @@ void esp_report_stat_sys(uint32_t epoch_sequence, SML_STAT_SYS_PAYLOAD *payload)
     payload->uptime_s = epoch_sequence;
     payload->pic_version = PIC_VERSION_NUMBER;
     payload->loop_max_ms = scheduler_take_longest_pass_ms();
+    if (system_clock_fallback())
+    {
+        payload->flags |= SML_SYS_CLOCK_FALLBACK;
+    }
+    if (fault_last()->kind != FAULT_NONE)
+    {
+        payload->flags |= SML_SYS_FAULT;
+        payload->fault = (uint16_t)((uint16_t)fault_last()->kind << 8 | fault_last()->trap);
+    }
+}
+
+
+static void print_version(uint32_t version)
+{
+    printf("%u.%u.%u", (unsigned)(version >> 16 & 0xFFUL), (unsigned)(version >> 8 & 0xFFUL),
+           (unsigned)(version & 0xFFUL));
+}
+
+
+// The boot stages: the IPL, the SPL, this application's record, and how
+// this start came about.
+static void print_boot(void)
+{
+    static const char *const paths[] = {"the IPL directly", "an unconfirmed SPL", "no SPL",
+                                        "the SPL given up", "the SPL as a last resort",
+                                        "after the SPL hung"};
+    BootIpl ipl;
+    BootSpl spl;
+    BootApp app;
+    uint8_t path = boot_path();
+    uint8_t bit;
+
+    boot_image_ipl(&ipl);
+    boot_image_spl(&spl, true);
+    boot_image_app(&app);
+    printf("Boot: IPL ");
+    if (ipl.present)
+    {
+        print_version(ipl.version);
+    }
+    else
+    {
+        printf("NONE");
+    }
+    printf(", SPL ");
+    if ((spl.state & SML_SPL_STATE_RECORD) == 0U)
+    {
+        printf("NONE");
+    }
+    else
+    {
+        print_version(spl.version);
+        printf(" %s%s%s%s",
+               (spl.state & SML_SPL_STATE_COMMITTED) != 0U ? "committed" : "UNCOMMITTED",
+               (spl.state & SML_SPL_STATE_INTACT) != 0U ? ", intact" : ", NOT INTACT",
+               (spl.state & SML_SPL_STATE_CONFIRMED) != 0U ? ", confirmed" : "",
+               (spl.state & SML_SPL_STATE_REJECTED) != 0U ? ", REJECTED" : "");
+    }
+    printf(", application record ");
+    if (app.committed)
+    {
+        print_version(app.version);
+        printf(", %lu instructions", (unsigned long)app.length);
+    }
+    else
+    {
+        printf("NONE");
+    }
+    printf("\n");
+    if (!boot_mailbox_valid())
+    {
+        printf("Boot: started without the IPL (no mailbox)\n");
+        return;
+    }
+    printf("Boot: started by ");
+    if ((path & (uint16_t)~SML_BOOT_PATH_SPL_HUNG) == 0U)
+    {
+        printf("the SPL%s", path != 0U ? ", " : "");
+    }
+    for (bit = 0; bit < sizeof(paths) / sizeof(paths[0]); bit++)
+    {
+        if ((path & (1U << bit)) != 0U)
+        {
+            printf("%s%s", (path & ((1U << bit) - 1U)) != 0U ? ", " : "", paths[bit]);
+        }
+    }
+    printf("; trials %u, attempts %u, healthy %u s\n", boot_trials(), boot_attempts(),
+           boot_healthy_s());
+    {
+        const SplWriterStatus *writer = spl_writer_status();
+
+        if (writer->erases != 0U || writer->rejects != 0U || writer->confirms != 0U ||
+            writer->reject_due || writer->session)
+        {
+            printf("SPL writer: %lu pages erased, %lu chunks, %lu commits, %lu confirms, %lu "
+                   "rejects, %lu failures%s%s\n",
+                   (unsigned long)writer->erases, (unsigned long)writer->chunks,
+                   (unsigned long)writer->commits, (unsigned long)writer->confirms,
+                   (unsigned long)writer->rejects, (unsigned long)writer->failures,
+                   writer->session ? "; ERASED, waiting for its data" : "",
+                   writer->reject_due ? "; reject due" : "");
+        }
+    }
 }
 
 
@@ -701,6 +808,15 @@ void esp_report_print_system(bool verbose)
         printf(" (RCON 0x%04X)", cause);
     }
     printf("\n");
+    fault_print();
+    if (system_clock_fallback())
+    {
+        printf("Clock: the external clock did not start: on the internal oscillator\n");
+    }
+    if (verbose)
+    {
+        print_boot();
+    }
 }
 
 

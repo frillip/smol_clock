@@ -1,8 +1,9 @@
 /*
  * Smol Clock V2 ESP32: network co-processor for the dsPIC timekeeper.
  *
- *   src/pic/       SML link to the PIC (pic_link), its state (pic_report);
- *                  sml/ links to the shared SML codec in common/
+ *   src/pic/       SML link to the PIC (pic_link), its state (pic_report),
+ *                  its updates (pic_boot, pic_update, the files staged in
+ *                  picfw: pic_store); sml/ links to common/
  *   src/timing/    NTP client and clock model, ESP PPS out, edge captures
  *   src/tz/        tzinfo v1 -> SML-TZ-STATE, TIME-LEAP
  *   src/net/       Wi-Fi, telnet, OTA updates, STAT-NET
@@ -24,6 +25,7 @@
 #include "src/net/telnet.h"
 #include "src/net/updater.h"
 #include "src/net/wifi_link.h"
+#include "src/pic/pic_boot.h"
 #include "src/pic/pic_link.h"
 #include "src/settings/user_prefs.h"
 #include "src/timing/ntp.h"
@@ -54,6 +56,7 @@ void setup()
     pps_init();
     pic_link_init();
     pic_link_set_command_handler(commands_from_pic);
+    pic_boot_init(&Serial);
     wifi_link_init(&Serial);
     telnet_init(&Serial);
     ntp_init();
@@ -87,6 +90,7 @@ void loop()
     bool network_up;
 
     pic_link_service();
+    pic_boot_service();
     wifi_link_service();
     network_up = wifi_link_is_up();
     ntp_service(network_up);
@@ -94,6 +98,7 @@ void loop()
     tzinfo_service(network_up);
     leap_service();
     net_status_service();
+    updater_poll(network_up);
 
     if (console_read_line(&serial_line, &Serial, true))
     {
