@@ -35,7 +35,10 @@ after its build is reported, as the build is then stale. Each file is named
 after the version read back from the file written.
 
 Paths default to the MPLAB X production builds and the Arduino build folder,
-from the repository root, wherever this is run from.
+from the repository root, wherever this is run from. The IPL is the newest
+released one in dspic_ipl/release/ (ipl-X.Y.Z.hex) when there is one, copied
+as it was released, so every first-installation hex carries the same IPL
+bits; else the IPL's production build, made into a release hex here.
 """
 import argparse
 import os
@@ -52,6 +55,7 @@ import make_manifest  # noqa: E402
 BASE_URL = "https://rubidium.darksky.io/smol_clock/v2plus/"
 DEFAULT_FOLDER = "prod"
 IPL_HEX = os.path.join(ROOT, "dspic_ipl", "dist", "default", "production", "dspic_ipl.production.hex")
+IPL_RELEASE = os.path.join(ROOT, "dspic_ipl", "release")
 SPL_HEX = os.path.join(ROOT, "dspic_spl", "dist", "default", "production", "dspic_spl.production.hex")
 APP_HEX = os.path.join(ROOT, "dspic_src", "dist", "default", "production", "dspic_src.production.hex")
 ESP_BIN = os.path.join(ROOT, "esp_src", "build", "esp32.esp32.esp32", "esp_src.ino.bin")
@@ -75,6 +79,32 @@ def check_fresh(built, header, what):
 def ipl_version(words):
     info = mi.check_ipl(words, "IPL")
     return info[mi.L["IPL_INFO_VERSION"]] << 16 | info[mi.L["IPL_INFO_VERSION"] + 1]
+
+
+def released_ipl():
+    """The newest dspic_ipl/release/ipl-X.Y.Z.hex, or None."""
+    found = []
+    if os.path.isdir(IPL_RELEASE):
+        for name in os.listdir(IPL_RELEASE):
+            match = re.match(r"^ipl-(\d+)\.(\d+)\.(\d+)\.hex$", name)
+            if match:
+                found.append((tuple(int(part) for part in match.groups()), name))
+    return os.path.join(IPL_RELEASE, max(found)[1]) if found else None
+
+
+def copy_released_ipl(path, out):
+    """A released IPL hex, checked (its info block filled in, as make_image.py
+    ipl leaves it), copied into out as ipl-X.Y.Z.hex. Its version and path."""
+    words, config = mi.split_config(mi.read_hex(path))
+    if not config:
+        raise DistError("%s: no configuration words: not a released IPL" % path)
+    info = mi.check_ipl(words, path)
+    if info[mi.L["IPL_INFO_CRC"]] != mi.ipl_info_crc(words):
+        raise DistError("%s: the info block's CRC-16 does not match: not as released" % path)
+    ipl = mi.version_text(ipl_version(words))
+    ipl_path = os.path.join(out, "ipl-%s.hex" % ipl)
+    shutil.copyfile(path, ipl_path)
+    return ipl, ipl_path
 
 
 def write(path, data):
@@ -110,6 +140,9 @@ def build(args):
         folder += "/" + "_".join(device.replace(":", "") for device in args.device)
     out = os.path.join(args.dist, folder)
     base_url = args.base_url + folder + "/"
+    released = args.ipl is None and released_ipl() is not None
+    if args.ipl is None:
+        args.ipl = released_ipl() or IPL_HEX
     for path, what in ((args.ipl, "IPL"), (args.spl, "SPL"), (args.app, "application")):
         if not os.path.isfile(path):
             raise DistError("%s: no %s build there" % (path, what))
@@ -118,12 +151,17 @@ def build(args):
     os.makedirs(out, exist_ok=True)
     made = []
 
-    # The IPL: released, its version from its own info block.
-    words, summary = mi.build_ipl(args.ipl, mi.default_build_time(args.ipl), warn)
-    ipl = mi.version_text(ipl_version(words))
-    ipl_path = os.path.join(out, "ipl-%s.hex" % ipl)
-    mi.write_hex(ipl_path, words)
-    made.append((ipl_path, summary))
+    # The IPL, its version from its own info block: the released one as it
+    # is, else made from the production build.
+    if released:
+        ipl, ipl_path = copy_released_ipl(args.ipl, out)
+        made.append((ipl_path, "IPL %s, released (%s)" % (ipl, os.path.relpath(args.ipl, ROOT))))
+    else:
+        words, summary = mi.build_ipl(args.ipl, mi.default_build_time(args.ipl), warn)
+        ipl = mi.version_text(ipl_version(words))
+        ipl_path = os.path.join(out, "ipl-%s.hex" % ipl)
+        mi.write_hex(ipl_path, words)
+        made.append((ipl_path, summary))
 
     # The SPL's and the application's files.
     check_fresh(args.spl, mi.SPL_VERSION_HEADER, "SPL")
@@ -190,7 +228,9 @@ def main(argv=None):
     parser.add_argument("--device", action="append",
                         help="limit the configuration to an ESP's MAC address (repeatable), "
                              "its files in a folder of their own")
-    parser.add_argument("--ipl", default=IPL_HEX, help="the IPL's production hex")
+    parser.add_argument("--ipl", default=None,
+                        help="the IPL's production hex (default: the newest in dspic_ipl/release/, "
+                             "else the production build)")
     parser.add_argument("--spl", default=SPL_HEX, help="the SPL's production hex")
     parser.add_argument("--app", default=APP_HEX, help="the application's production hex")
     parser.add_argument("--esp", default=ESP_BIN, help="the ESP's image (Arduino's build folder)")
