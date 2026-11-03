@@ -108,7 +108,6 @@ uint32_t spl_port_ms(void)
 
 void spl_port_service(void)
 {
-    for (;;);
     ClrWdt();
     if (U1STAbits.OERR)
     {

@@ -5,6 +5,6 @@
 // reads it from here). The SPL reports the one in its record.
 #define SPL_VERSION_MAJOR 0
 #define SPL_VERSION_MINOR 1
-#define SPL_VERSION_PATCH 3
+#define SPL_VERSION_PATCH 4
 
 #endif // SPL_VERSION_H
