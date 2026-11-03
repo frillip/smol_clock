@@ -1,0 +1,39 @@
+# House style for the V2+ dsPIC sources. Apply with tools/format.sh, which
+# runs clang-format with this file and then tools/style.py for the rules
+# clang-format cannot express: // for comments of up to three lines, two
+# blank lines after each function definition in .c files, one elsewhere.
+# Naming (by hand): lower_snake_case functions and variables, CamelCase
+# types, UPPER_CASE macros and enum constants.
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: c++03
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+BreakBeforeBraces: Allman
+IndentCaseLabels: true
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortEnumsOnASingleLine: false
+AlwaysBreakAfterReturnType: None
+AlignAfterOpenBracket: Align
+AlignConsecutiveMacros: Consecutive
+AlignEscapedNewlines: Left
+AlignTrailingComments: true
+AlignOperands: true
+BinPackArguments: true
+BinPackParameters: true
+ContinuationIndentWidth: 4
+PointerAlignment: Right
+SpaceBeforeParens: ControlStatements
+SortIncludes: Never
+IncludeBlocks: Preserve
+ReflowComments: false
+MaxEmptyLinesToKeep: 2
+KeepEmptyLinesAtTheStartOfBlocks: false
+InsertBraces: false
+LineEnding: DeriveLF
