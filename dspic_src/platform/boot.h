@@ -31,8 +31,9 @@ uint16_t boot_trials(void);
 uint16_t boot_attempts(void);
 
 // Every second from the main loop, with the seconds since start: once the
-// application has run for APP_HEALTHY_S, the boot-loop guard's count is
-// zeroed. healthy_s: the seconds counted, saturating.
+// application has run for BOOT_HEALTHY_S, the boot-loop guard's count is
+// zeroed. healthy_s: the seconds counted, saturating (APP_HEALTHY_S gates an
+// SPL update on it).
 void boot_service(uint32_t uptime_s);
 uint16_t boot_healthy_s(void);
 

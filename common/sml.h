@@ -71,6 +71,7 @@ typedef struct
 uint16_t sml_crc(uint16_t crc, const uint8_t *data, uint16_t length);
 
 // The table entry for a class and ID, or NULL if the message is unknown.
+// Not built with SML_NO_MESSAGES (the SPL), nor is sml_frame_message().
 const SmlMessage *sml_message(uint8_t class_id, uint8_t message_id);
 // Every known message, for diagnostics and tests.
 const SmlMessage *sml_messages(uint8_t *count);

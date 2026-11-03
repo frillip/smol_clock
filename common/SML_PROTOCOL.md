@@ -677,7 +677,7 @@ Commands run by the PIC:
 | 0x0021 | `SET_DEBUG` | clear << 16 \| set, `SML_DEBUG_*` bits | ✓ See below. Setting a bit outside `SML_DEBUG_ALL` is NACK `ARGUMENT`; clearing any is fine (0xFFFF clears all) |
 | 0x0030 | `RESYNC` | — | ✓ (2.4) Every source judged again and the choice made again, at the next epoch: each source's record starts afresh, holdover is dropped, and the clock free runs on its learnt frequency, counting the time of day on, until a source qualifies again (3 epochs). The best by bound is then taken up as at start-up, slewed onto if the loop was tracking and its edge is close, else stepped. TIME-PIC `last_sync_cause` RESYNC. ACK at once |
 | 0x0031 | `RESET` | — | ✓ ACK, flush, then software reset |
-| 0x0032 | `ENTER_BOOTLOADER` | — | ACK, then a reset into the SPL, which starts `HELD` ([Entering the SPL](#entering-the-spl)). Not yet implemented: NACK UNSUPPORTED until 0.4.0 |
+| 0x0032 | `ENTER_BOOTLOADER` | — | ✓ ACK, then a reset into the SPL, which starts `HELD` ([Entering the SPL](#entering-the-spl)). NACK BUSY while a settings save is pending, NACK STATE without the IPL's mailbox or a usable SPL (intact and not rejected) |
 
 `SHOW` topics:
 
@@ -765,14 +765,14 @@ The bootloader's messages. The PIC boots in two stages: a frozen initial loader 
 
 ## BOOT-STATUS (0x01)
 
-_PIC→ESP, 56 bytes._ The SPL sends it on entry, every second while idle, and before the ACK to `STATUS`. The application sends it only before the ACK to `STATUS`, with `mode` `APP`.
+_PIC→ESP, 56 bytes._ The SPL sends it on entry (with `CHECKING` while the image's CRC-32 is still to be computed: the next one has the result), every second while idle, and before the ACK to `STATUS`. The application sends it only before the ACK to `STATUS`, with `mode` `APP`.
 
 | Offset | Field | Type | Meaning |
 | --- | --- | --- | --- |
 | 0 | `spl_version` | u32 | From the SPL record (major << 16 \| minor << 8 \| patch), 0 without one |
 | 4 | `protocol` | u8 | `SML_BOOT_PROTOCOL`, 1 |
 | 5 | `mode` | u8 | `WINDOW` 0, `HELD` 1, `NO_APP` 2, `LOOP` 3, `APP` 4 |
-| 6 | `flags` | u16 | `RECORD` 0x0001, `COMMITTED` 0x0002, `CHECKING` 0x0004, `IMAGE_OK` 0x0008, `ERASED` 0x0010, `REQUESTED` 0x0020, `POWER_ON` 0x0040, `TEST_FREE` 0x0080 |
+| 6 | `flags` | u16 | `RECORD` 0x0001, `COMMITTED` 0x0002, `CHECKING` 0x0004, `IMAGE_OK` 0x0008, `ERASED` 0x0010 (a session open: erased, not yet committed), `REQUESTED` 0x0020, `POWER_ON` 0x0040, `TEST_FREE` 0x0080 |
 | 8 | `reset_cause` | u16 | RCON as found (`SML_RESET_*`) |
 | 10 | `window_ms` | u16 | Left of the boot window (`WINDOW`), else 0 |
 | 12 | `device_id` | u32 | DEVID |
@@ -815,13 +815,13 @@ _PIC→ESP, 56 bytes._ The SPL sends it on entry, every second while idle, and b
 | --- | --- | --- | --- |
 | 0x01 | `STATUS` | SPL, application | BOOT-STATUS, then ACK |
 | 0x02 | `HOLD` | SPL | ACK. No boot window, no hand-over until `RUN` |
-| 0x03 | `ERASE` | SPL (`APP`, `TEST`), application (`SPL`) | ACCEPTED, then ACK with `value` the pages erased, or NACK `STORAGE`. The record's page first, then the rest, then a blank check |
-| 0x04 | `COMMIT` | SPL (`APP`, `TEST`), application (`SPL`) | ACCEPTED, then ACK. `ARGUMENT` for a start or length outside the region, `STATE` without an `ERASE` in this session, `VERIFY` (with `value` the CRC-32 computed) when the flash does not match `crc32`. Then the record, then its `commit` words alone |
+| 0x03 | `ERASE` | SPL (`APP`, `TEST`), application (`SPL`) | ACCEPTED, then ACK with `value` the pages erased, or NACK `STORAGE` (`value` the pages erased so far). The record's page first, then the rest, then a blank check. Starts a session: `DATA` and `COMMIT` need one. The SPL refuses it (NACK `STATE`) in `WINDOW` (`HOLD` first), for `TEST` while the application reaches the test page, and for `APP` while it is unconfirmed and the application valid |
+| 0x04 | `COMMIT` | SPL (`APP`, `TEST`), application (`SPL`) | `ARGUMENT` for a start or length outside the region. Else ACCEPTED, then ACK. `VERIFY` (with `value` the CRC-32 computed) when the flash does not match `crc32`. A repeat of a `COMMIT` already written (its ACK lost) is ACKed again. Otherwise `STATE` without an `ERASE` in this session or with the record row not blank. Then the record, read back, then its `commit` words alone, read back. Ends the session. For `APP`, the SPL also zeroes the boot-loop count and stays `HELD` |
 | 0x05 | `RUN` | SPL | ACK, then the application if its image is valid, else NACK `STATE` |
 | 0x06 | `RESET` | SPL | ACK, then a software reset |
 | 0x07 | `CONFIRM` | Application (`SPL`) | ACK once the SPL record's `confirm` words are written, NACK `STATE` unless started by an unconfirmed SPL |
 
-`ERASE` and `COMMIT` without the right key are NACK `ARGUMENT`. Commands an answerer does not take are NACK `UNSUPPORTED`, and anything arriving while ACCEPTED work is under way NACK `BUSY`. The application also refuses an SPL update for its first 60 healthy seconds, and the SPL refuses to erase a valid application while it is itself unconfirmed (both NACK `STATE`).
+`ERASE` and `COMMIT` without the right key are NACK `ARGUMENT`. Commands an answerer does not take are NACK `UNSUPPORTED`. The application answers anything arriving while ACCEPTED work is under way NACK `BUSY`. The SPL keeps it and answers once the work is done. The application also refuses an SPL update for its first 60 healthy seconds, and the SPL refuses to erase a valid application while it is itself unconfirmed (both NACK `STATE`).
 
 ## BOOT-DATA (0x50) and BOOT-DATA-RESPONSE (0x60)
 

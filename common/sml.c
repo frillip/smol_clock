@@ -4,6 +4,11 @@
 #include <string.h>
 
 // ---- Message table --------------------------------------------------------
+/* Not built with SML_NO_MESSAGES, which the SPL defines: it frames and
+ * parses, but never needs the table, some 400 instructions of program memory
+ * as constants, which its linker did not drop. */
+#ifndef SML_NO_MESSAGES
+
 // Field sizes in wire order, as in sml_proto.h: 2 and 4 are big-endian
 // integers, any other size that many bytes as they are. The host tests check
 // that each layout adds up to the struct size and to the length in the table.
@@ -141,6 +146,8 @@ const SmlMessage *sml_messages(uint8_t *count)
     return messages;
 }
 
+#endif // SML_NO_MESSAGES
+
 
 // ---- CRC ------------------------------------------------------------------
 
@@ -276,6 +283,8 @@ uint16_t sml_frame(uint8_t class_id, uint8_t message_id, const uint8_t *payload,
 }
 
 
+#ifndef SML_NO_MESSAGES
+
 uint16_t sml_frame_message(uint8_t class_id, uint8_t message_id, const void *native, uint8_t *frame)
 {
     const SmlMessage *message = sml_message(class_id, message_id);
@@ -287,6 +296,8 @@ uint16_t sml_frame_message(uint8_t class_id, uint8_t message_id, const void *nat
     (void)sml_encode(message->layout, native, frame + SML_HEADER_BYTES);
     return sml_frame(class_id, message_id, frame + SML_HEADER_BYTES, message->length, frame);
 }
+
+#endif // SML_NO_MESSAGES
 
 
 // ---- Parser ---------------------------------------------------------------

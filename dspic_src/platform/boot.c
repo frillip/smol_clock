@@ -57,7 +57,7 @@ uint16_t boot_attempts(void)
 void boot_service(uint32_t uptime_s)
 {
     healthy_s = uptime_s > 0xFFFFUL ? 0xFFFFU : (uint16_t)uptime_s;
-    if (valid && healthy_s >= APP_HEALTHY_S)
+    if (valid && healthy_s >= BOOT_HEALTHY_S)
     {
         mailbox.attempts = 0;
     }

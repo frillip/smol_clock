@@ -3,9 +3,10 @@
   make_image.py app <app.hex> -o app.smolpic [--build-time S]
       The application file for the ESP: a 64-byte header, then the packed
       image from 0x002000. Version from platform/version.h.
-  make_image.py spl <spl.hex> -o spl.smolspl --version X.Y.Z [--min-ipl X.Y.Z]
+  make_image.py spl <spl.hex> -o spl.smolspl [--version X.Y.Z] [--min-ipl X.Y.Z]
       The SPL file: a 64-byte header, then the packed code from 0x000800.
-  make_image.py install --ipl <ipl.hex> [--spl <spl.hex> --spl-version X.Y.Z]
+      Version from dspic_spl/spl_version.h unless given.
+  make_image.py install --ipl <ipl.hex> [--spl <spl.hex> [--spl-version X.Y.Z]]
                         --app <app.hex> -o first.hex
       The first-installation hex, for a PICkit: the IPL with the configuration
       words, the SPL with its record committed and confirmed, the application
@@ -34,6 +35,7 @@ TOOLS = os.path.dirname(os.path.abspath(__file__))
 VERSION_HEADER = os.path.join(TOOLS, "..", "platform", "version.h")
 SML_PROTO = os.path.join(TOOLS, "..", "..", "common", "sml_proto.h")
 BOOT_LAYOUT = os.path.join(TOOLS, "..", "..", "common", "boot_layout.h")
+SPL_VERSION_HEADER = os.path.join(TOOLS, "..", "..", "dspic_spl", "spl_version.h")
 
 # dsPIC33EP256GP504 (silicon errata DS80000533, table 1).
 DEVICE_ID = 0x1F6C
@@ -83,6 +85,11 @@ def app_version(path=VERSION_HEADER):
     return version_number(d["PIC_VERSION_MAJOR"], d["PIC_VERSION_MINOR"], d["PIC_VERSION_PATCH"])
 
 
+def spl_version(path=SPL_VERSION_HEADER):
+    d = read_defines(path, ["SPL_VERSION_MAJOR", "SPL_VERSION_MINOR", "SPL_VERSION_PATCH"])
+    return version_number(d["SPL_VERSION_MAJOR"], d["SPL_VERSION_MINOR"], d["SPL_VERSION_PATCH"])
+
+
 def sml_version(path=SML_PROTO):
     d = read_defines(path, ["SML_PROTOCOL_MAJOR", "SML_PROTOCOL_MINOR"])
     return d["SML_PROTOCOL_MAJOR"] << 8 | d["SML_PROTOCOL_MINOR"]
@@ -117,25 +124,33 @@ def read_hex(path):
     holds (4 bytes of hex per instruction: 3 and the phantom byte)."""
     memory = {}
     upper = 0
-    with open(path) as handle:
-        for number, line in enumerate(handle, 1):
-            line = line.strip()
-            if not line:
-                continue
-            if not line.startswith(":"):
-                raise ImageError("%s:%d: not Intel HEX" % (path, number))
-            record = bytes.fromhex(line[1:])
-            if sum(record) & 0xFF:
-                raise ImageError("%s:%d: checksum" % (path, number))
-            length, address, kind = record[0], record[1] << 8 | record[2], record[3]
-            data = record[4:4 + length]
-            if kind == 0:
-                for index, value in enumerate(data):
-                    memory[upper + address + index] = value
-            elif kind == 4:
-                upper = (data[0] << 8 | data[1]) << 16
-            elif kind == 1:
-                break
+    with open(path, "rb") as handle:
+        data = handle.read()
+    if data.startswith((APP_MAGIC, SPL_MAGIC)):
+        raise ImageError("%s: an image file (make_image.py app or spl), not a hex: install takes the "
+                         "MPLAB .hex files" % path)
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError:
+        raise ImageError("%s: not Intel HEX (not text)" % path)
+    for number, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        if not line.startswith(":"):
+            raise ImageError("%s:%d: not Intel HEX" % (path, number))
+        record = bytes.fromhex(line[1:])
+        if sum(record) & 0xFF:
+            raise ImageError("%s:%d: checksum" % (path, number))
+        length, address, kind = record[0], record[1] << 8 | record[2], record[3]
+        data = record[4:4 + length]
+        if kind == 0:
+            for index, value in enumerate(data):
+                memory[upper + address + index] = value
+        elif kind == 4:
+            upper = (data[0] << 8 | data[1]) << 16
+        elif kind == 1:
+            break
     words = {}
     for byte_address in memory:
         base = byte_address & ~3
@@ -349,6 +364,10 @@ def spl_words(path, warn):
     take_region(words, L["SPL_START"], L["SPL_RECORD_ADDRESS"], path)
     if image_length(words, L["SPL_START"]) > L["SPL_CODE_MAX"]:
         raise ImageError("%s: longer than %d instructions" % (path, L["SPL_CODE_MAX"]))
+    target = goto_target(words, L["SPL_START"])
+    if target is None or not L["SPL_START"] + 4 <= target < L["SPL_RECORD_ADDRESS"]:
+        raise ImageError("%s: no GOTO into the SPL's code at 0x%06X: not linked by spl.gld" %
+                         (path, L["SPL_START"]))
     return words
 
 
@@ -481,7 +500,7 @@ def main(argv=None):
     p = sub.add_parser("spl")
     p.add_argument("hex")
     p.add_argument("-o", "--output", required=True)
-    p.add_argument("--version", required=True)
+    p.add_argument("--version")
     p.add_argument("--min-ipl", default="0.0.0")
     p.add_argument("--build-time", type=int)
     p = sub.add_parser("install")
@@ -515,13 +534,15 @@ def main(argv=None):
         if args.action == "app":
             data = build_app(args.hex, args.build_time or default_build_time(args.hex), warn)
         elif args.action == "spl":
-            data = build_spl(args.hex, parse_version(args.version), parse_version(args.min_ipl),
+            data = build_spl(args.hex, parse_version(args.version) if args.version else spl_version(),
+                             parse_version(args.min_ipl),
                              args.build_time or default_build_time(args.hex), warn)
         else:
-            if (args.spl is None) != (args.spl_version is None):
-                raise ImageError("--spl and --spl-version go together")
+            if args.spl is None and args.spl_version is not None:
+                raise ImageError("--spl-version without --spl")
             words = build_install(args.ipl, args.spl, args.app,
-                                  parse_version(args.spl_version) if args.spl else None,
+                                  (parse_version(args.spl_version) if args.spl_version else spl_version())
+                                  if args.spl else None,
                                   args.build_time or default_build_time(args.app), warn)
             write_hex(args.output, words)
             print("wrote %s: IPL, %sapplication (committed), configuration words"

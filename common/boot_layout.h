@@ -141,8 +141,9 @@
 
 // ---- Limits -------------------------------------------------------------------
 #define SPL_TRIAL_LIMIT  3    // starts of an unconfirmed SPL before the application
-#define BOOT_LOOP_LIMIT  3    // hand-overs without the application reporting healthy
-#define APP_HEALTHY_S    60   // healthy running that zeroes attempts, allows an SPL update
+#define BOOT_LOOP_LIMIT  8    // hand-overs without the application reporting healthy
+#define BOOT_HEALTHY_S   30   // running that counts as healthy: zeroes attempts
+#define APP_HEALTHY_S    60   // healthy running that allows an SPL update
 #define BOOT_WINDOW_MS   1000 // the SPL's boot window
 #define BOOT_WATCHDOG_MS 4096 // PR128, PS1024 on the 32 kHz LPRC; 3905 ms measured
 

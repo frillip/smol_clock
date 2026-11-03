@@ -369,13 +369,15 @@ Erasing a page stops the CPU for roughly 20–30ms, with interrupts held off thr
 
 # Bootloader
 
-The IPL leaves a mailbox in the top 16 bytes of RAM below 0x8000 (0x7FF0–0x7FFF), which no C start-up touches ([platform/boot.c](platform/boot.c), [common/boot_layout.h](../common/boot_layout.h)). It holds why the PIC reset: the IPL clears RCON's cause bits and keeps them there, so `last reset` and STAT-SYS `reset_cause` come from the mailbox. Started without the IPL, from a debugger say, the mailbox's magic is wrong and RCON is used as before. The mailbox also says how this start came about (the SPL, or the IPL directly with no SPL or a failed one), and counts hand-overs for the boot-loop guard: the application zeroes that count once it has run for 60 s.
+The IPL leaves a mailbox in the top 16 bytes of RAM below 0x8000 (0x7FF0–0x7FFF), which no C start-up touches ([platform/boot.c](platform/boot.c), [common/boot_layout.h](../common/boot_layout.h)). It holds why the PIC reset: the IPL clears RCON's cause bits and keeps them there, so `last reset` and STAT-SYS `reset_cause` come from the mailbox. Started without the IPL, from a debugger say, the mailbox's magic is wrong and RCON is used as before. The mailbox also says how this start came about (the SPL, or the IPL directly with no SPL or a failed one), and counts hand-overs for the boot-loop guard: the application zeroes that count once it has run for 30 s, and the SPL stays after 8 starts without that.
 
 `ENTER_BOOTLOADER` leaves a request in the mailbox and resets once its ACK is out, and the SPL starts held. It is refused (`STATE`) without the IPL's mailbox or an intact SPL to stay in, and (`BUSY`) while a save is pending.
 
 `pic -v` shows the boot stages ([drivers/boot_image.c](drivers/boot_image.c)): the IPL's version, the SPL's record (committed, intact, confirmed or rejected), the application's record, and how this start came about. The SPL's CRC-32 is checked through the IPL's service at 0x000200.
 
 Every interrupt reaches its handler through the forwarding table, a `GOTO` of 4 cycles, so the PPS watch's latency is 37 ticks rather than V2's 33.
+
+The SPL ([dspic_spl](../dspic_spl/README.md)) can be driven from a PC before the ESP's side exists: [tools/pic_boot.py](tools/pic_boot.py) installs an application file (`make_image.py app`) over any serial port wired to UART1, the ESP's UART bridge for instance, as the ESP will.
 
 # Not yet ported
 

@@ -755,7 +755,7 @@ static void print_boot(void)
     printf("Boot: started by ");
     if (path == 0U)
     {
-        printf("by the SPL");
+        printf("the SPL");
     }
     for (bit = 0; bit < sizeof(paths) / sizeof(paths[0]); bit++)
     {
