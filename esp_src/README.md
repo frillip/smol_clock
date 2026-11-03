@@ -246,7 +246,15 @@ Every configuration is checked before any is used, and a manifest with a malform
 make_manifest.py --base-url https://rubidium.darksky.io/smol_clock/v2plus/dev/ --esp esp_src.ino.bin --pic app.smolpic --pic-spl spl.smolspl -o manifest.json
 ```
 
-[tools/make_dist.py](../tools/make_dist.py) does the whole release from the latest builds: the released IPL hex, the SPL and application files, the first-installation hex, the ESP's image and the manifest, each named after the version read from it, into `dist/`. A version header edited after its build is reported. `python tools/make_dist.py` with no arguments uses the MPLAB X production builds and the Arduino build folder.
+[tools/make_dist.py](../tools/make_dist.py) does the whole release from the latest builds: the released IPL hex, the SPL and application files, the first-installation hex and the ESP's image, each named after the version read from it, into `dist/<folder>/`, and their configuration into `dist/manifest.json`. A version header edited after its build is reported. With no arguments it uses the MPLAB X production builds and the Arduino build folder, and writes the default configuration (no `update config`) with its files in `prod/`. `--config dev` writes the configuration an ESP set to `update config dev` takes, with its files in `dev/`. The manifest is updated, not replaced: only that configuration changes. Upload `dist/` as it is to `https://rubidium.darksky.io/smol_clock/v2plus/`:
+
+```
+python tools/make_dist.py                # prod/, the default configuration
+python tools/make_dist.py --config dev   # dev/, for update config dev
+python tools/make_dist.py --config dev --device EC:64:C9:06:D3:50   # dev/EC64C906D350/, that clock alone
+```
+
+`--device` (repeatable) limits a configuration to those clocks, by the Wi-Fi MAC address `wifi -v` prints. It is a configuration of its own, put ahead of the ones without devices so those clocks take it first, but only while their `update config` matches too. Its files go in a folder named after the addresses, inside the config's, so the configuration everyone else takes keeps its own.
 
 ## Order
 
