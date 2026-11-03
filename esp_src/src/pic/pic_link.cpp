@@ -522,17 +522,18 @@ static void handle_frame(const SmlFrame *frame)
 // ESP's flash is erased or written, with its interrupt held off) comes here
 // too, as the parser gives its bytes back: its header (0xB5) and binary
 // payload mark the line, which is then dropped, not printed. So is a line
-// left unfinished when the link goes quiet: the PIC's own lines end in '\n'.
+// still unfinished when a whole frame arrives: the PIC sends its raw text only
+// while it sends no frames (in TEXT mode, or just started), and a line from it
+// can pause part-way (its start-up banner does, while it sets up) but is not
+// interrupted by a frame.
 // Terminal controls (the clear screen at the PIC's start) are left out:
 // ESC, then '[' and parameters up to a final byte from 0x40 to 0x7E.
 #define TEXT_LINE_BYTES 160U
-#define TEXT_QUIET_MS   250U
 
 static uint8_t text_line[TEXT_LINE_BYTES];
 static uint16_t text_length;
 static bool text_bad;     // the line held a byte no console text has
 static bool text_pending; // a line is open
-static uint32_t text_ms;  // its last byte
 
 static void end_line(bool complete)
 {
@@ -561,7 +562,6 @@ static void on_text(const uint8_t *text, uint16_t length, void *context)
         uint8_t c = text[index];
 
         text_pending = true;
-        text_ms = millis();
         if (c == 0x1B)
         {
             escape = 1;
@@ -603,6 +603,11 @@ static void on_text(const uint8_t *text, uint16_t length, void *context)
 static void on_frame(const SmlFrame *frame, void *context)
 {
     (void)context;
+    if (text_pending)
+    {
+        text_bad = true; // a broken frame's bytes, before this one
+        end_line(false);
+    }
     handle_frame(frame);
 }
 
@@ -644,10 +649,6 @@ void pic_link_service(void)
     {
         sml_stream_timeout(&stream);
     }
-    if (text_pending && now - text_ms > TEXT_QUIET_MS)
-    {
-        end_line(false);
-    }
     expire_requests();
 }
 
@@ -671,6 +672,16 @@ void pic_link_set_command_handler(PicCommandHandler handler)
 void pic_link_set_frame_hook(PicFrameHook hook)
 {
     frame_hook = hook;
+}
+
+
+void pic_link_left_spl(const char *why)
+{
+    if (in_spl)
+    {
+        in_spl = false;
+        console_printf("PIC: out of its SPL (%s)\n", why);
+    }
 }
 
 

@@ -94,6 +94,10 @@ void pic_link_set_frame_hook(PicFrameHook hook);
 
 // The PIC is in its SPL: a BOOT-STATUS from it, no STAT-SYS since.
 bool pic_link_in_spl(void);
+// The PIC has left its SPL without its application saying so yet (its link
+// starts in TEXT mode and sends nothing until a frame arrives): the link's
+// own traffic resumes, and its STAT-SYS follows. why is printed.
+void pic_link_left_spl(const char *why);
 // A frame whose payload is already in wire order, sent whatever the mode.
 void pic_link_send_wire(uint8_t class_id, uint8_t message_id, const uint8_t *payload,
                         uint16_t length);

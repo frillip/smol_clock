@@ -18,6 +18,10 @@ extern "C"
 // Recovery: a PIC left in its SPL without a valid application gets the
 // staged file after this long, at most this many times an ESP start.
 #define RECOVER_AFTER_MS 30000U
+// The SPL sends BOOT-STATUS every second while idle: this long without one,
+// and no update running, it has handed over (or the PIC reset into its
+// application) and the link resumes.
+#define SPL_SILENT_MS 5000U
 #define RECOVER_LIMIT    3U
 
 static PicUpdate update;
@@ -73,6 +77,10 @@ static void on_frame(const SmlFrame *frame)
         }
         command_reply->printf("\n");
         command_reply = NULL;
+        if (status == SML_RESULT_ACK && frame->payload[6] == SML_BOOT_CMD_RUN)
+        {
+            pic_link_left_spl("RUN");
+        }
     }
 }
 
@@ -243,6 +251,11 @@ static void recover(void)
 
 void pic_boot_service(void)
 {
+    if (pic_link_in_spl() && !pic_boot_updating() &&
+        !pic_link_get(SML_CLASS_BOOT, SML_BOOT_STATUS, NULL, SPL_SILENT_MS))
+    {
+        pic_link_left_spl("no BOOT-STATUS for 5 s");
+    }
     if (started)
     {
         if (pic_update_running(&update))
