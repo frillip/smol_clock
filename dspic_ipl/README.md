@@ -48,10 +48,10 @@ Addresses, records and the mailbox are shared with the SPL and the application i
 
 An MPLAB X project for XC16, `-O1`, with the C start-up but no data initialisation: nothing in the IPL has an initial value, and the mailbox is `persistent` at its fixed address, which keeps the stack below it. The linker script confines the code to 0x000200–0x00077F, so an IPL that outgrows its page does not link.
 
-The hex MPLAB writes is not the one to program. [make_image.py](../dspic_src/tools/make_image.py) checks page 0 and fills in the info block's build time and CRC-16:
+The hex MPLAB writes is not the one to program. [make_image.py](../tools/make_image.py) checks page 0 and fills in the info block's build time and CRC-16:
 
 ```
-python3 ../dspic_src/tools/make_image.py ipl dist/default/production/dspic_ipl.production.hex -o ipl-0.1.0.hex
+python3 ../tools/make_image.py ipl dist/default/production/dspic_ipl.production.hex -o ipl-0.1.0.hex
 ```
 
 A released IPL's hex is committed as it was released, and the first-installation hex and the other projects' Loadables use that file, so every clock carries the same IPL bits.

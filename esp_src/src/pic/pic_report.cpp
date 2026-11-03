@@ -625,6 +625,8 @@ void pic_report_print_link(Stream *output)
     output->printf("Parser: %lu noise bytes, %lu CRC errors, %lu length errors, %lu timeouts\n",
                    (unsigned long)parser->noise_bytes, (unsigned long)parser->crc_errors,
                    (unsigned long)parser->length_errors, (unsigned long)parser->timeouts);
+    output->printf("Text:   %lu bytes printed, %lu lines dropped (broken frames, unfinished)\n",
+                   (unsigned long)stats->text_bytes, (unsigned long)stats->text_dropped);
     output->printf("Commands: %lu to the PIC, %lu answered, %lu unanswered; %lu from it\n",
                    (unsigned long)stats->requests, (unsigned long)stats->responses,
                    (unsigned long)stats->unanswered, (unsigned long)stats->commands);

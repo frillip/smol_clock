@@ -9,7 +9,7 @@
 
 #define PIC_VERSION_MAJOR 0
 #define PIC_VERSION_MINOR 3
-#define PIC_VERSION_PATCH 2
+#define PIC_VERSION_PATCH 7
 
 #define PIC_VERSION_NUMBER                                                  \
     ((uint32_t)PIC_VERSION_MAJOR << 16 | (uint32_t)PIC_VERSION_MINOR << 8 | \

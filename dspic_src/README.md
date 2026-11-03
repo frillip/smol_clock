@@ -14,7 +14,7 @@ The project is an MPLAB X project in [nbproject](nbproject), built with XC16 2.1
 
 The application runs behind the bootloader: the IPL in page 0 ([dspic_ipl](../dspic_ipl)) and, once it exists, the SPL in pages 1–3. It is linked from 0x002000 with [app.gld](app.gld), generated from Microchip's script for the device by [tools/gen_app_gld.py](tools/gen_app_gld.py): its entry at 0x002000, then a forwarding table of one `GOTO` per interrupt vector, which the IPL's interrupt table points at. [platform/app_vectors.s](platform/app_vectors.s) keeps the linker's own interrupt table out of the hex and the version-record page free. The configuration words are the IPL's, programmed with it, so the application's hex has none.
 
-To program a chip, use the hex `tools/make_image.py install` makes from the IPL's and the application's hex files (and the SPL's, once there is one), with the settings pages 0x029800–0x02A7FF preserved. Programming the application alone leaves a chip with no reset vector and erased configuration words. For debugging, add the IPL's released hex to the project's Loadables.
+To program a chip, use the hex `tools/make_image.py install` (in the repository root) makes from the IPL's and the application's hex files (and the SPL's, once there is one), with the settings pages 0x029800–0x02A7FF preserved. Programming the application alone leaves a chip with no reset vector and erased configuration words. For debugging, add the IPL's released hex to the project's Loadables.
 
 The SML codec and protocol definitions are shared with the ESP. They are not copied into this folder: the project includes `common/sml_proto.h`, `common/sml.c` and `common/sml.h`, along with `common/enums.h`, directly from [common](../common). The includes (`../../common/sml.h` and friends) rely on the repository layout, so keep the two folders side by side.
 
@@ -60,7 +60,7 @@ The image tool has Python tests of its own: `python3 -m unittest discover -s tes
 
 [tools/format.sh](tools/format.sh) applies the house style: clang-format with [.clang-format](.clang-format), then [tools/style.py](tools/style.py). Firmware sources use CRLF line endings, the host tests LF.
 
-[tools/make_image.py](tools/make_image.py) turns production `.hex` files into the bootloader's files: the application image and the SPL image the ESP sends, and the first-installation hex for a PICkit. `info` checks a file. The bootloader itself is still to come, so for now only a build linked for it (from 0x002000) makes an application image.
+[tools/make_image.py](../tools/make_image.py) turns production `.hex` files into the bootloader's files: the application image and the SPL image the ESP sends, and the first-installation hex for a PICkit. `info` checks a file. The bootloader itself is still to come, so for now only a build linked for it (from 0x002000) makes an application image.
 
 # Layout
 
@@ -377,7 +377,7 @@ The IPL leaves a mailbox in the top 16 bytes of RAM below 0x8000 (0x7FF0–0x7FF
 
 Every interrupt reaches its handler through the forwarding table, a `GOTO` of 4 cycles, so the PPS watch's latency is 37 ticks rather than V2's 33.
 
-The SPL ([dspic_spl](../dspic_spl/README.md)) can be driven from a PC before the ESP's side exists: [tools/pic_boot.py](tools/pic_boot.py) installs an application file (`make_image.py app`) over any serial port wired to UART1, the ESP's UART bridge for instance, as the ESP will.
+The SPL ([dspic_spl](../dspic_spl/README.md)) can be driven from a PC before the ESP's side exists: [tools/pic_boot.py](../tools/pic_boot.py) installs an application file (`make_image.py app`) over any serial port wired to UART1, the ESP's UART bridge for instance, as the ESP will.
 
 # Not yet ported
 

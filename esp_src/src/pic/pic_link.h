@@ -50,6 +50,7 @@ typedef struct
     uint32_t wrong_length;
     uint32_t text_frames; // STAT-DEBUG
     uint32_t text_bytes;  // raw console text outside frames
+    uint32_t text_dropped; // ... lines dropped: broken frames, unfinished
     uint32_t sent;        // frames sent
     uint32_t commands;    // CMD-USER from the PIC
     uint32_t requests;    // CMD-USER to the PIC
@@ -84,6 +85,10 @@ typedef void (*PicFrameHook)(const SmlFrame *frame);
 
 void pic_link_init(void);
 void pic_link_service(void);
+// pic_link_service() from inside long blocking work (a download): frames are
+// read and kept, so the receive buffer does not overflow, but a command from
+// the PIC is answered BUSY rather than carried out there.
+void pic_link_poll(void);
 void pic_link_set_command_handler(PicCommandHandler handler);
 void pic_link_set_frame_hook(PicFrameHook hook);
 

@@ -102,6 +102,10 @@ bool pic_store_find(PicFileKind kind, uint32_t version, const uint8_t sha256[SHA
 // there is none.
 bool pic_store_pick(PicFileKind kind, uint32_t prefer, PicStoredFile *file);
 
+// Empties a slot: the sector holding its header erased, so it no longer
+// holds a valid file. False if the flash failed or there is no picfw.
+bool pic_store_erase(PicFileKind kind, uint8_t slot);
+
 // The slot a new file goes to. running: the version the PIC reports, 0 if
 // unknown.
 uint8_t pic_store_choose(PicFileKind kind, uint32_t running);

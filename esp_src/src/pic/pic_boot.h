@@ -26,8 +26,12 @@ bool pic_boot_update(const PicStoredFile *file, bool force, Stream *output);
 bool pic_boot_updating(void);
 
 // "pic boot": where the PIC is (its application, or its SPL and what the
-// SPL reports), the files staged, and the last update.
+// SPL reports), and the last update.
 void pic_boot_print(Stream *output, bool verbose);
+// The files staged in picfw: the application's slots (verbose: the SPL's).
+void pic_boot_print_staged(Stream *output, bool verbose);
+// "update erase": empties the application's slots, the SPL's, or both.
+void pic_boot_erase(Stream *output, bool application, bool spl);
 // "pic boot run|hold", to the SPL; its answer printed on output.
 void pic_boot_command(Stream *output, uint8_t command);
 

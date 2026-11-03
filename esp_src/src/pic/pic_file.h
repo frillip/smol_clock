@@ -1,5 +1,5 @@
 /*
- * The PIC's image files, as dspic_src/tools/make_image.py writes them: a
+ * The PIC's image files, as tools/make_image.py writes them: a
  * 64-byte header, big-endian, its own CRC-32 in its last 4 bytes, then the
  * packed image (3 bytes an instruction, least significant first) whose
  * CRC-32 the header holds.

@@ -211,6 +211,9 @@ static int download(const ManifestComponent *component, Sink sink, void *context
         {
             break;
         }
+        // Drain the PIC link: a download holds up loop() for many seconds,
+        // longer than its receive buffer lasts.
+        pic_link_poll();
         waiting = (size_t)stream->available();
         if (waiting == 0)
         {
@@ -518,7 +521,10 @@ static bool install_pic(const ManifestEntry *entry, uint32_t running, bool force
     }
     if (file.header.version != offered)
     {
-        output->printf("PIC update: the file holds another version than the manifest says\n");
+        (void)pic_store_erase(PIC_FILE_APP, file.slot);
+        output->printf("PIC update: the file holds another version than the manifest says: slot "
+                       "%u emptied\n",
+                       file.slot);
         return false;
     }
     if (!pic_compatible(&file, output))
@@ -529,37 +535,40 @@ static bool install_pic(const ManifestEntry *entry, uint32_t running, bool force
 }
 
 
-// The application the PIC runs, into picfw, when the manifest offers that
-// version and no slot holds it: a copy to reinstall without the network
-// (update pic force, offline), and for pic_boot's recovery of a PIC left
-// without an application.
-static void stage_running(const ManifestEntry *entry, Stream *output)
+// The manifest's PIC application into picfw, if no slot holds it: the file
+// for its install, fetched ahead, or, when it is the one the PIC runs, a copy
+// to reinstall without the network (update pic force offline, and pic_boot's
+// recovery of a PIC left without an application). The slot holding the
+// version the PIC runs is kept (pic_store_choose()).
+static void stage_offered(const ManifestEntry *entry, Stream *output)
 {
     PicStoredFile file;
     uint32_t offered = 0;
+    uint32_t running = pic_heard ? pic_version_heard : 0U;
     uint8_t slot;
-    char text[16];
 
-    if (!pic_store_present() || pic_boot_updating() || !pic_heard || pic_version_heard == 0U ||
-        !entry->pic.present || !pic_file_version(entry->pic.version, &offered) ||
-        offered != pic_version_heard ||
-        (pic_store_pick(PIC_FILE_APP, pic_version_heard, &file) &&
-         file.header.version == pic_version_heard))
+    if (!pic_store_present() || pic_boot_updating() || !entry->pic.present ||
+        !pic_file_version(entry->pic.version, &offered) ||
+        pic_store_find(PIC_FILE_APP, offered, entry->pic.sha256, &file))
     {
         return;
     }
-    slot = pic_store_choose(PIC_FILE_APP, pic_version_heard);
-    pic_report_version(text, sizeof(text), pic_version_heard);
-    output->printf("PIC: staging %s, the application it runs, into slot %u\n", text, slot);
-    if (stage_pic(entry, slot, &file, "PIC staging", output))
+    slot = pic_store_choose(PIC_FILE_APP, running);
+    output->printf("PIC: staging %s%s into slot %u\n", entry->pic.version,
+                   offered == running ? ", the application it runs," : "", slot);
+    if (!stage_pic(entry, slot, &file, "PIC staging", output))
     {
-        if (file.header.version != offered)
-        {
-            output->printf("PIC staging: the file holds another version than the manifest says\n");
-            return;
-        }
-        output->printf("PIC: %s staged in slot %u\n", text, slot);
+        return;
     }
+    if (file.header.version != offered)
+    {
+        (void)pic_store_erase(PIC_FILE_APP, slot);
+        output->printf("PIC staging: the file holds another version than the manifest says: "
+                       "slot %u emptied\n",
+                       slot);
+        return;
+    }
+    output->printf("PIC: %s staged in slot %u\n", entry->pic.version, slot);
 }
 
 
@@ -668,7 +677,7 @@ bool updater_check(Stream *output)
     available = esp_due(&entry, false);
     pic_available = pic_due(&entry, false, &running_version) == PIC_DUE;
     print_offers(output, &entry);
-    stage_running(&entry, output);
+    stage_offered(&entry, output);
     return available || pic_available;
 }
 
@@ -713,11 +722,11 @@ void updater_pull(Stream *output)
         return;
     }
     print_offers(output, &entry);
-    stage_running(&entry, output);
+    stage_offered(&entry, output);
 }
 
 
-void updater_force(Stream *output)
+void updater_esp(Stream *output, bool force)
 {
     ManifestEntry entry;
 
@@ -726,12 +735,26 @@ void updater_force(Stream *output)
     {
         return;
     }
-    if (!esp_due(&entry, true))
+    if (!entry.esp.present)
     {
-        output->printf("ESP: nothing else offered\n");
+        output->printf("ESP: nothing offered\n");
         return;
     }
-    install_esp_reported(output, &entry, true);
+    if (!esp_due(&entry, force))
+    {
+        output->printf(force ? "ESP: %s offered, the version it runs\n"
+                             : "ESP: %s offered, up to date (force to install any version)\n",
+                       entry.esp.version);
+        return;
+    }
+    install_esp_reported(output, &entry, force);
+}
+
+
+void updater_spl(Stream *output, bool force)
+{
+    (void)force;
+    output->printf("PIC SPL: updates are not supported yet\n");
 }
 
 
@@ -752,7 +775,7 @@ void updater_pic(Stream *output, bool force)
     case PIC_NOT_HEARD: output->printf("PIC: not heard from: its version is not known\n"); break;
     case PIC_CURRENT:
         output->printf("PIC: up to date (force to install it again)\n");
-        stage_running(&entry, output);
+        stage_offered(&entry, output);
         break;
     case PIC_WAITS_FOR_ESP:
         output->printf("PIC: the ESP's update first (%s)\n", entry.esp.version);
@@ -800,7 +823,7 @@ void updater_service(bool have_local, uint32_t local_seconds)
     }
     else
     {
-        stage_running(&entry, output);
+        stage_offered(&entry, output);
     }
 }
 

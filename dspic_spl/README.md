@@ -65,15 +65,15 @@ The flash routines in [spl_port.c](spl_port.c) refuse any address outside the ap
 An MPLAB X project for XC16, `-O1`, the small code and data models (all of the SPL's 882 bytes of RAM near, where one instruction reaches them), with each function and each object in its own section and unused ones removed. `SML_NO_MESSAGES` leaves `sml.c`'s message table out, which the linker did not drop by itself: the SPL frames and parses, but needs no table. Data initialisation on. The mailbox is `persistent` at its fixed address. The linker script confines the code to 0x000800–0x001F7F: an SPL that outgrows it does not link.
 
 ```
-python3 ../dspic_src/tools/make_image.py spl dist/default/production/dspic_spl.production.hex -o spl.smolspl
-python3 ../dspic_src/tools/make_image.py install --ipl ipl-0.1.0.hex --spl dist/default/production/dspic_spl.production.hex --app <app.hex> -o first.hex
+python3 ../tools/make_image.py spl dist/default/production/dspic_spl.production.hex -o spl.smolspl
+python3 ../tools/make_image.py install --ipl ipl-0.1.0.hex --spl dist/default/production/dspic_spl.production.hex --app <app.hex> -o first.hex
 ```
 
 The first is the file the application will take in an SPL update. The second programs the IPL, the SPL with its record committed and confirmed, and the application, for a PICkit. The SPL's hex alone is not bootable: it has no record.
 
 ## Testing without the ESP
 
-[dspic_src/tools/pic_boot.py](../dspic_src/tools/pic_boot.py) does what the ESP will do, from a PC, through any serial port wired to the PIC's UART1, the ESP running a UART bridge for instance:
+[tools/pic_boot.py](../tools/pic_boot.py) does what the ESP will do, from a PC, through any serial port wired to the PIC's UART1, the ESP running a UART bridge for instance:
 
 ```
 python3 pic_boot.py --port COM5 hold           # then reset the PIC: stops the window

@@ -240,11 +240,13 @@ The updater ([src/net/updater.cpp](src/net/updater.cpp)) reads the manifest at `
 
 Every configuration is checked before any is used, and a manifest with a malformed one is refused whole. The clock takes the first configuration whose `hardware` is `v2`, whose `config` matches `update config` (absent means the default, none), and whose `devices`, if given, include its MAC address (any case). Each component is optional, but a configuration needs at least one. Versions are dotted numbers, compared numerically (`1.10` is newer than `1.9`). A download must match the manifest's size and SHA-256, or it is discarded. `pic_spl` is read and reported, but not yet installed.
 
-[dspic_src/tools/make_manifest.py](../dspic_src/tools/make_manifest.py) writes the manifest for a set of files, reading each version from the file itself (the PIC's headers, the ESP's user agent string), and adds to or replaces a configuration in an existing one with `--merge`:
+[tools/make_manifest.py](../tools/make_manifest.py) writes the manifest for a set of files, reading each version from the file itself (the PIC's headers, the ESP's user agent string), and adds to or replaces a configuration in an existing one with `--merge`:
 
 ```
 make_manifest.py --base-url https://rubidium.darksky.io/smol_clock/v2plus/dev/ --esp esp_src.ino.bin --pic app.smolpic --pic-spl spl.smolspl -o manifest.json
 ```
+
+[tools/make_dist.py](../tools/make_dist.py) does the whole release from the latest builds: the released IPL hex, the SPL and application files, the first-installation hex, the ESP's image and the manifest, each named after the version read from it, into `dist/`. A version header edited after its build is reported. `python tools/make_dist.py` with no arguments uses the MPLAB X production builds and the Arduino build folder.
 
 ## Order
 
@@ -252,7 +254,7 @@ Newer only, unless forced. The ESP goes first: the PIC's application is only ins
 
 ## The PIC's files
 
-The PIC's application (`.smolpic`) and SPL (`.smolspl`) files come from `dspic_src/tools/make_image.py`: a 64-byte header with its own CRC-32, then the image packed three bytes per instruction. They are staged in the `picfw` partition (512 KB):
+The PIC's application (`.smolpic`) and SPL (`.smolspl`) files come from `tools/make_image.py`: a 64-byte header with its own CRC-32, then the image packed three bytes per instruction. They are staged in the `picfw` partition (512 KB):
 
 | Offset | Slot |
 | --- | --- |
@@ -264,7 +266,7 @@ The PIC's application (`.smolpic`) and SPL (`.smolspl`) files come from `dspic_s
 
 A file is written image first, its header last, so a slot interrupted mid-write has no valid header. A slot is only trusted when its header's CRC and the image's CRC both pass, whatever else was in the flash before. A download goes to a slot with no valid file, else the one whose version is not the one the PIC runs, else the older. The slot the PIC runs from is kept, so a file already staged (same version and SHA-256) is installed again without a download.
 
-The application the PIC runs is kept staged too. When the manifest offers the version the PIC runs and no slot holds it, `update check`, `update install`, `update pic` and the daily check download it into a slot (`PIC: staging 0.3.1, the application it runs, into slot 0`). So a clock that has been online once holds a copy of its own application.
+The application the manifest offers is staged ahead. When no slot holds it, `update check`, `update install`, `update pic` (when up to date) and the daily check download it into a slot, keeping the slot with the version the PIC runs (`PIC: staging 0.3.1, the application it runs, into slot 0`). So a clock that has been online once holds a copy of its application, and an update offered is installed without waiting for the download.
 
 Without the update server (no Wi-Fi, or the server down), `update pic force` installs a staged file: the version the PIC runs, else the newest. `update pic` does the same unasked when the PIC is in its SPL without a valid application. And the ESP does it by itself: a PIC that stays in its SPL without a valid application for 30 s (an update cut short, its power pulled mid-update) is given the staged file it last ran, else the newest, up to three times per ESP start.
 
@@ -285,7 +287,9 @@ PIC update: committing
 PIC update: DONE, the PIC runs it, <seconds> s
 ```
 
-`pic boot` prints what the SPL reports (its mode, versions, whether the application is valid) when the PIC is in it, or else the application's version, then the staged files (`-v` also the SPL slots) and how the last update went. `pic boot run` and `pic boot hold` send RUN and HOLD to the SPL.
+`pic boot` prints what the SPL reports (its mode, versions, whether the application is valid) when the PIC is in it, or else the application's version, then how the last update went. `pic boot run` and `pic boot hold` send RUN and HOLD to the SPL. `update` lists the staged files (`-v` also the SPL slots), and `update erase pic|spl|all` empties their slots (the sector holding each header is erased).
+
+While a download holds up the main loop, the PIC link is still drained between reads (`pic_link_poll()`), so its 4 KB receive buffer does not overflow. A command from the PIC that arrives then is answered BUSY. Bytes are still lost while the ESP erases or writes its flash (the UART's 128-byte FIFO overruns with its interrupt held off, at 921600 baud in under 1.5 ms), so broken frames are expected then. The PIC's raw console text is printed a whole line at a time, and a line holding any byte no console text has (a broken frame's header or payload), or left unfinished when the link goes quiet, is dropped and counted (`pic -v`, `Text:`). The PIC's terminal controls (the clear screen at its start) are left out.
 
 # Telnet
 

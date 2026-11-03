@@ -147,6 +147,16 @@ bool pic_store_pick(PicFileKind kind, uint32_t prefer, PicStoredFile *file)
 }
 
 
+bool pic_store_erase(PicFileKind kind, uint8_t slot)
+{
+    if (flash == NULL || slot >= PIC_STORE_SLOTS)
+    {
+        return false;
+    }
+    return flash->erase(pic_store_slot_offset(kind, slot), PIC_STORE_SECTOR);
+}
+
+
 uint8_t pic_store_choose(PicFileKind kind, uint32_t running)
 {
     PicStoredFile files[PIC_STORE_SLOTS];

@@ -352,19 +352,7 @@ void pic_boot_print(Stream *output, bool verbose)
     {
         output->printf("PIC: not heard from\n");
     }
-    if (!pic_store_present())
-    {
-        output->printf("Staged: no picfw partition\n");
-    }
-    else
-    {
-        output->printf("Staged:\n");
-        print_slots(output, PIC_FILE_APP, "application");
-        if (verbose)
-        {
-            print_slots(output, PIC_FILE_SPL, "SPL");
-        }
-    }
+    (void)verbose;
     if (!started)
     {
         return;
@@ -386,6 +374,53 @@ void pic_boot_print(Stream *output, bool verbose)
     {
         output->printf(", FAILED: %s\n", update.reason);
     }
+}
+
+
+void pic_boot_print_staged(Stream *output, bool verbose)
+{
+    if (!pic_store_present())
+    {
+        output->printf("Staged: no picfw partition\n");
+        return;
+    }
+    output->printf("Staged:\n");
+    print_slots(output, PIC_FILE_APP, "application");
+    if (verbose)
+    {
+        print_slots(output, PIC_FILE_SPL, "SPL");
+    }
+}
+
+
+void pic_boot_erase(Stream *output, bool application, bool spl)
+{
+    uint8_t slot;
+    unsigned erased = 0;
+
+    if (!pic_store_present())
+    {
+        output->printf("Staged: no picfw partition\n");
+        return;
+    }
+    if (pic_boot_updating())
+    {
+        output->printf("Staged: not while a PIC update runs\n");
+        return;
+    }
+    for (slot = 0; slot < PIC_STORE_SLOTS; slot++)
+    {
+        if (application)
+        {
+            erased += pic_store_erase(PIC_FILE_APP, slot) ? 1U : 0U;
+        }
+        if (spl)
+        {
+            erased += pic_store_erase(PIC_FILE_SPL, slot) ? 1U : 0U;
+        }
+    }
+    output->printf("Staged: %u slots erased%s\n", erased,
+                   application ? "; \"update check\" stages the PIC's application again" : "");
 }
 
 
