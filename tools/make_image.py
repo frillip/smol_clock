@@ -32,10 +32,10 @@ import time
 import zlib
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
-VERSION_HEADER = os.path.join(TOOLS, "..", "platform", "version.h")
-SML_PROTO = os.path.join(TOOLS, "..", "..", "common", "sml_proto.h")
-BOOT_LAYOUT = os.path.join(TOOLS, "..", "..", "common", "boot_layout.h")
-SPL_VERSION_HEADER = os.path.join(TOOLS, "..", "..", "dspic_spl", "spl_version.h")
+VERSION_HEADER = os.path.join(TOOLS, "..", "dspic_src", "platform", "version.h")
+SML_PROTO = os.path.join(TOOLS, "..", "common", "sml_proto.h")
+BOOT_LAYOUT = os.path.join(TOOLS, "..", "common", "boot_layout.h")
+SPL_VERSION_HEADER = os.path.join(TOOLS, "..", "dspic_spl", "spl_version.h")
 
 # dsPIC33EP256GP504 (silicon errata DS80000533, table 1).
 DEVICE_ID = 0x1F6C
