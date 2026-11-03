@@ -11,6 +11,7 @@ extern "C"
 {
 #include "pic_update.h"
 #include "sml/sml.h"
+#include "spl_update.h"
 }
 
 #define BOOT_STATUS_AGE_MS 3000U
@@ -25,6 +26,17 @@ extern "C"
 #define RECOVER_LIMIT    3U
 
 static PicUpdate update;
+static SplUpdate spl;
+static PicStoredFile spl_staged; // the SPL file being installed
+static bool spl_started;
+static bool spl_reinstall; // this one puts back the SPL kept: no other after it
+static SplUpdateStep spl_shown;
+static uint32_t spl_started_ms;
+static uint32_t spl_finished_ms;
+static uint8_t spl_quarter;
+static PicStoreWriter keep_writer; // big: not on the stack
+static Sha256 keep_sha;
+static PicStoredFile spl_kept; // where the running SPL went
 static PicStoredFile staged; // the file being installed
 static bool started;         // an update has run since start
 static PicUpdateStep shown;  // the step last reported
@@ -55,12 +67,93 @@ static bool read_image(void *context, uint32_t offset, uint8_t *data, uint32_t l
 
 static const PicUpdatePort port = {send, read_image, NULL};
 
+
+// The SPL update's port: the staged SPL file, and the running SPL kept in
+// the SPL slot the new file is not in.
+static bool spl_read(void *context, uint32_t offset, uint8_t *data, uint32_t length)
+{
+    (void)context;
+    return pic_store_read_image(&spl_staged, offset, data, length);
+}
+
+
+static bool spl_stored(void *context, uint32_t version, uint32_t crc32)
+{
+    uint8_t slot;
+
+    (void)context;
+    for (slot = 0; slot < PIC_STORE_SLOTS; slot++)
+    {
+        PicStoredFile file;
+
+        if (pic_store_get(PIC_FILE_SPL, slot, &file) && file.header.version == version &&
+            file.header.crc32 == crc32)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+
+static bool keep_begin(void *context, const PicFileHeader *header)
+{
+    uint8_t bytes[PIC_FILE_HEADER_BYTES];
+    uint8_t slot = spl_staged.slot == 0 ? 1U : 0U;
+
+    (void)context;
+    spl_kept.valid = false;
+    if (pic_store_begin(&keep_writer, PIC_FILE_SPL, slot, pic_file_bytes(header)) != PIC_STORE_OK)
+    {
+        return false;
+    }
+    pic_file_spl_header(header, bytes);
+    sha256_start(&keep_sha);
+    sha256_update(&keep_sha, bytes, sizeof(bytes));
+    return pic_store_write(&keep_writer, bytes, sizeof(bytes)) == PIC_STORE_OK;
+}
+
+
+static bool keep_write(void *context, const uint8_t *data, uint32_t length)
+{
+    (void)context;
+    sha256_update(&keep_sha, data, length);
+    return pic_store_write(&keep_writer, data, length) == PIC_STORE_OK;
+}
+
+
+static bool keep_end(void *context)
+{
+    uint8_t digest[SHA256_BYTES];
+    PicStoreResult result;
+
+    (void)context;
+    sha256_finish(&keep_sha, digest);
+    result = pic_store_finish(&keep_writer, digest, &spl_kept);
+    if (result != PIC_STORE_OK)
+    {
+        console_printf("SPL update: keeping the running SPL: %s\n", pic_store_result_name(result));
+        spl_kept.valid = false;
+        return false;
+    }
+    return true;
+}
+
+
+static const SplUpdatePort spl_port = {send,       spl_read, spl_stored, keep_begin,
+                                       keep_write, keep_end, NULL};
+
 static void on_frame(const SmlFrame *frame)
 {
     if (started && pic_update_running(&update))
     {
         pic_update_frame(&update, frame->class_id, frame->message_id, frame->payload,
                          frame->length, millis());
+    }
+    if (spl_started && spl_update_running(&spl))
+    {
+        spl_update_frame(&spl, frame->class_id, frame->message_id, frame->payload, frame->length,
+                         millis());
     }
     // The answer to "pic boot run|hold".
     if (command_reply != NULL && frame->class_id == SML_CLASS_BOOT &&
@@ -139,9 +232,60 @@ bool pic_boot_update(const PicStoredFile *file, bool force, Stream *output)
 }
 
 
+bool pic_boot_update_spl(const PicStoredFile *file, bool force, Stream *output)
+{
+    char text[16];
+
+    if (!pic_store_present())
+    {
+        output->printf("SPL update: no picfw partition\n");
+        return false;
+    }
+    if (pic_boot_updating())
+    {
+        output->printf("SPL update: a PIC update is running already\n");
+        return false;
+    }
+    if (!file->valid || file->kind != PIC_FILE_SPL)
+    {
+        output->printf("SPL update: no valid SPL file\n");
+        return false;
+    }
+    if (pic_link_in_spl())
+    {
+        output->printf("SPL update: the PIC is in its SPL: it is written through the "
+                       "application\n");
+        return false;
+    }
+    spl_staged = *file;
+    spl_kept.valid = false;
+    spl_started = true;
+    spl_reinstall = false;
+    spl_shown = SPL_UPDATE_FAILED;
+    spl_quarter = 0;
+    spl_started_ms = millis();
+    pic_report_version(text, sizeof(text), spl_staged.header.version);
+    console_printf("SPL update: to %s, %lu instructions%s\n", text,
+                   (unsigned long)spl_staged.header.length, force ? ", forced" : "");
+    spl_update_start(&spl, &spl_port, &spl_staged.header, force, spl_started_ms);
+    return true;
+}
+
+
 bool pic_boot_updating(void)
 {
-    return started && pic_update_running(&update);
+    return (started && pic_update_running(&update)) || (spl_started && spl_update_running(&spl));
+}
+
+
+bool pic_boot_spl_result(bool *done)
+{
+    if (!spl_started || spl_update_running(&spl))
+    {
+        return false;
+    }
+    *done = spl.step == SPL_UPDATE_DONE;
+    return true;
 }
 
 
@@ -192,6 +336,123 @@ static void report(void)
             quarter = now_quarter;
             console_printf("PIC update: %s %u%%\n",
                            update.step == PIC_UPDATE_DATA ? "written" : "read back", 25U * quarter);
+        }
+    }
+}
+
+
+// The SPL it kept, else another valid SPL file that is not the rejected
+// one: installed, forced, once.
+static void spl_put_back(void)
+{
+    PicStoredFile file;
+    uint8_t slot;
+    PicFileHeader rejected = spl_staged.header;
+
+    if (spl_reinstall)
+    {
+        console_printf("SPL update: the SPL put back was rejected too: the IPL starts the "
+                       "application directly\n");
+        return;
+    }
+    file.valid = false;
+    if (spl_kept.valid && pic_store_get(PIC_FILE_SPL, spl_kept.slot, &file) &&
+        (file.header.version != rejected.version || file.header.crc32 != rejected.crc32))
+    {
+        // the kept one
+    }
+    else
+    {
+        file.valid = false;
+        for (slot = 0; slot < PIC_STORE_SLOTS && !file.valid; slot++)
+        {
+            if (!pic_store_get(PIC_FILE_SPL, slot, &file) ||
+                (file.header.version == rejected.version && file.header.crc32 == rejected.crc32))
+            {
+                file.valid = false;
+            }
+        }
+    }
+    if (!file.valid)
+    {
+        console_printf("SPL update: no other SPL staged to put back: the IPL starts the "
+                       "application directly\n");
+        return;
+    }
+    console_printf("SPL update: putting the previous SPL back\n");
+    if (pic_boot_update_spl(&file, true, &Serial))
+    {
+        spl_reinstall = true;
+    }
+}
+
+
+static void spl_report(void)
+{
+    uint8_t now_quarter;
+    char text[16];
+
+    if (spl.step != spl_shown)
+    {
+        spl_shown = spl.step;
+        spl_quarter = 0;
+        switch (spl.step)
+        {
+        case SPL_UPDATE_HEALTHY:
+            console_printf("SPL update: waiting for the application to have run 60 s\n");
+            break;
+        case SPL_UPDATE_KEEP_RECORD: console_printf("SPL update: keeping the running SPL\n"); break;
+        case SPL_UPDATE_ERASE: console_printf("SPL update: erasing\n"); break;
+        case SPL_UPDATE_DATA:
+            console_printf("SPL update: writing %lu chunks\n", (unsigned long)spl.chunks);
+            break;
+        case SPL_UPDATE_VERIFY: console_printf("SPL update: reading back\n"); break;
+        case SPL_UPDATE_COMMIT: console_printf("SPL update: committing\n"); break;
+        case SPL_UPDATE_ENTER: console_printf("SPL update: starting the new SPL\n"); break;
+        case SPL_UPDATE_TEST_ERASE: console_printf("SPL update: testing the new SPL\n"); break;
+        case SPL_UPDATE_RUN: console_printf("SPL update: back to the application\n"); break;
+        case SPL_UPDATE_WAIT_CONFIRM:
+            console_printf("SPL update: confirming once the application has run 60 s\n");
+            break;
+        case SPL_UPDATE_DONE:
+            spl_finished_ms = millis();
+            pic_report_version(text, sizeof(text), spl_staged.header.version);
+            if (spl.newer)
+            {
+                console_printf("SPL update: DONE, a newer SPL runs (force installs %s)\n", text);
+            }
+            else
+            {
+                console_printf(spl.already ? "SPL update: DONE, %s is there already\n"
+                                           : "SPL update: DONE, %s confirmed, %.1f s\n",
+                               text, (spl_finished_ms - spl_started_ms) / 1000.0);
+            }
+            break;
+        case SPL_UPDATE_FAILED:
+            spl_finished_ms = millis();
+            console_printf("SPL update: FAILED: %s\n", spl.reason);
+            break;
+        case SPL_UPDATE_REJECTED:
+            spl_finished_ms = millis();
+            console_printf("SPL update: REJECTED: %s\n", spl.reason);
+            spl_put_back();
+            break;
+        default:
+            break;
+        }
+        if (spl.passes != 0 && spl.step == SPL_UPDATE_STATUS)
+        {
+            console_printf("SPL update: pass %u, after %s\n", (unsigned)spl.passes + 1U, spl.reason);
+        }
+    }
+    if ((spl.step == SPL_UPDATE_DATA || spl.step == SPL_UPDATE_VERIFY) && spl.chunks != 0)
+    {
+        now_quarter = (uint8_t)(4U * spl.chunk / spl.chunks);
+        if (now_quarter > spl_quarter && now_quarter < 4U)
+        {
+            spl_quarter = now_quarter;
+            console_printf("SPL update: %s %u%%\n",
+                           spl.step == SPL_UPDATE_DATA ? "written" : "read back", 25U * spl_quarter);
         }
     }
 }
@@ -263,6 +524,15 @@ void pic_boot_service(void)
             pic_update_service(&update, millis());
         }
         report();
+    }
+    if (spl_started)
+    {
+        if (spl_update_running(&spl))
+        {
+            spl_update_service(&spl, millis());
+        }
+        pic_link_hold(spl_update_holds_link(&spl));
+        spl_report();
     }
     recover();
 }
@@ -366,6 +636,32 @@ void pic_boot_print(Stream *output, bool verbose)
         output->printf("PIC: not heard from\n");
     }
     (void)verbose;
+    if (spl_started)
+    {
+        output->printf("SPL update: ");
+        print_version(output, spl_staged.header.version);
+        if (spl_update_running(&spl))
+        {
+            output->printf(", %s", spl_update_step_name(spl.step));
+            if (spl.step == SPL_UPDATE_DATA || spl.step == SPL_UPDATE_VERIFY)
+            {
+                output->printf(", chunk %lu of %lu", (unsigned long)spl.chunk,
+                               (unsigned long)spl.chunks);
+            }
+            output->printf(", pass %u%s\n", (unsigned)spl.passes + 1U,
+                           spl.kept ? ", running SPL kept" : "");
+        }
+        else if (spl.step == SPL_UPDATE_DONE)
+        {
+            output->printf(", DONE%s in %.1f s\n",
+                           spl.newer ? " (a newer one runs)" : spl.already ? " (already there)" : "",
+                           (spl_finished_ms - spl_started_ms) / 1000.0);
+        }
+        else
+        {
+            output->printf(", %s: %s\n", spl_update_step_name(spl.step), spl.reason);
+        }
+    }
     if (!started)
     {
         return;

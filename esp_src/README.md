@@ -45,7 +45,7 @@ The portable parts of the firmware have host tests: the clock model, NTP packet 
 cd tests/host && make
 ```
 
-The console commands and the PIC link have their own, in `tests/commands`: every command against a PIC played by the test, the settings written whole and their answers, and the value parsers (`cd tests/commands && make`). The dual-stack fallback has its own too, in `tests/net`: the order addresses are tried in, a failed family held back and given back, and URLs (`cd tests/net && make`). So do the NTP servers, in `tests/ntp`: the choice between servers that agree or not, and the NTP service against fake servers that agree, lie, go quiet and change (`cd tests/ntp && make`). And the settings, in `tests/settings`: kept from older firmware, and the NTP servers' defaults (`cd tests/settings && make`). The update manifest's parsing and selection are in `tests/manifest`, which needs the ArduinoJson submodule. The PIC's updates are in `tests/pic_update`: the `picfw` slots against a model of NOR flash, and the whole bootloader exchange against the real SPL core from `dspic_spl`, with frames lost and damaged, PIC resets and power cut at every step.
+The console commands and the PIC link have their own, in `tests/commands`: every command against a PIC played by the test, the settings written whole and their answers, and the value parsers (`cd tests/commands && make`). The dual-stack fallback has its own too, in `tests/net`: the order addresses are tried in, a failed family held back and given back, and URLs (`cd tests/net && make`). So do the NTP servers, in `tests/ntp`: the choice between servers that agree or not, and the NTP service against fake servers that agree, lie, go quiet and change (`cd tests/ntp && make`). And the settings, in `tests/settings`: kept from older firmware, and the NTP servers' defaults (`cd tests/settings && make`). The update manifest's parsing and selection are in `tests/manifest`, which needs the ArduinoJson submodule. The PIC's updates are in `tests/pic_update`: the `picfw` slots against a model of NOR flash, and the whole bootloader exchange against the real SPL core from `dspic_spl`, with frames lost and damaged, PIC resets and power cut at every step. The SPL's update runs end to end against the IPL's choice of what starts, the SPL core and the application's SPL writer: kept, rejected and put back, and power cut at the application's flash work.
 
 [tools/format.sh](tools/format.sh) applies the same house style as the dsPIC sources.
 
@@ -56,7 +56,7 @@ The console commands and the PIC link have their own, in `tests/commands`: every
 | `esp_src.ino` | `setup()` and `loop()` |
 | `src/board.h`, `src/version.h` | Pin map and baud rates, firmware version |
 | `src/common/` | Links to the shared protocol definitions |
-| `src/pic/` | The PIC link: SML framing, the PIC's console text, its held state, commands in both directions, pairing TIME-AUTH with the epoch edge. Also the PIC state report, and the PIC's updates: its files (`pic_file`), their staging in `picfw` (`pic_store`), the bootloader exchange (`pic_update`) and its console glue (`pic_boot`). `sml/` links to the shared SML codec and boot layout |
+| `src/pic/` | The PIC link: SML framing, the PIC's console text, its held state, commands in both directions, pairing TIME-AUTH with the epoch edge. Also the PIC state report, and the PIC's updates: its files (`pic_file`), their staging in `picfw` (`pic_store`), the bootloader exchange (`pic_update`), the SPL's update (`spl_update`) and their console glue (`pic_boot`). `sml/` links to the shared SML codec and boot layout |
 | `src/timing/` | NTP client and packet handling, the clock model, ESP PPS output, PIC epoch and GNSS PPS capture |
 | `src/tz/` | tzinfo lookups and cache, TZ-STATE assembly, TIME-LEAP |
 | `src/net/` | WiFi, dual-stack connections with fallback, Telnet, the update manifest and updates, STAT-NET |
@@ -238,7 +238,7 @@ The updater ([src/net/updater.cpp](src/net/updater.cpp)) reads the manifest at `
 }
 ```
 
-Every configuration is checked before any is used, and a manifest with a malformed one is refused whole. The clock takes the first configuration whose `hardware` is `v2`, whose `config` matches `update config` (absent means the default, none), and whose `devices`, if given, include its MAC address (any case). Each component is optional, but a configuration needs at least one. Versions are dotted numbers, compared numerically (`1.10` is newer than `1.9`). A download must match the manifest's size and SHA-256, or it is discarded. `pic_spl` is read and reported, but not yet installed.
+Every configuration is checked before any is used, and a manifest with a malformed one is refused whole. The clock takes the first configuration whose `hardware` is `v2`, whose `config` matches `update config` (absent means the default, none), and whose `devices`, if given, include its MAC address (any case). Each component is optional, but a configuration needs at least one. Versions are dotted numbers, compared numerically (`1.10` is newer than `1.9`). A download must match the manifest's size and SHA-256, or it is discarded.
 
 [tools/make_manifest.py](../tools/make_manifest.py) writes the manifest for a set of files, reading each version from the file itself (the PIC's headers, the ESP's user agent string), and adds to or replaces a configuration in an existing one with `--merge`:
 
@@ -274,7 +274,7 @@ The PIC's application (`.smolpic`) and SPL (`.smolspl`) files come from `tools/m
 
 A file is written image first, its header last, so a slot interrupted mid-write has no valid header. A slot is only trusted when its header's CRC and the image's CRC both pass, whatever else was in the flash before. A download goes to a slot with no valid file, else the one whose version is not the one the PIC runs, else the older. The slot the PIC runs from is kept, so a file already staged (same version and SHA-256) is installed again without a download.
 
-The application the manifest offers is staged ahead. When no slot holds it, `update check`, `update install`, `update pic` (when up to date) and the daily check download it into a slot, keeping the slot with the version the PIC runs (`PIC: staging 0.3.1, the application it runs, into slot 0`). So a clock that has been online once holds a copy of its application, and an update offered is installed without waiting for the download.
+The application the manifest offers is staged ahead. When no slot holds it, `update check`, `update install`, `update pic` (when up to date) and the daily check download it into a slot, keeping the slot with the version the PIC runs (`PIC: staging 0.3.1, the application it runs, into slot 0`). So a clock that has been online once holds a copy of its application, and an update offered is installed without waiting for the download. The SPL offered is staged the same way, into the SPL slots.
 
 Without the update server (no Wi-Fi, or the server down), `update pic force` installs a staged file: the version the PIC runs, else the newest. `update pic` does the same unasked when the PIC is in its SPL without a valid application. And the ESP does it by itself: a PIC that stays in its SPL without a valid application for 30 s (an update cut short, its power pulled mid-update) is given the staged file it last ran, else the newest, up to three times per ESP start.
 
@@ -294,6 +294,36 @@ PIC update: reading back
 PIC update: committing
 PIC update: DONE, the PIC runs it, <seconds> s
 ```
+
+## Installing the PIC's SPL
+
+The SPL is written by the running application, not by itself ([src/pic/spl_update.c](src/pic/spl_update.c), the PIC's side in `dspic_src/esp/spl_writer.c`). `update spl` stages the file like the application's, then:
+
+- STATUS to the application: the bootloader protocol, the DEVID, the IPL new enough for the file (`min_ipl`), the test page free. The same SPL there already, intact and confirmed, ends it at once, as does a newer one, unless forced.
+- Until the application has run 60 s, STATUS every 5 s.
+- The running SPL is read back with BOOT-VERIFY into the other SPL slot, unless a slot holds it already: the one to go back to.
+- ERASE, DATA, VERIFY and COMMIT of region SPL, as for an application. The application does the flash work in its flash window, one page erase an epoch, so each answer can take up to a second. While a request is out, the ESP sends the PIC nothing else.
+- ENTER_BOOTLOADER: the IPL starts the new SPL, unconfirmed. Its BOOT-STATUS must come within 25 s.
+- Through the new SPL, a test: ERASE, four chunks of DATA, VERIFY and COMMIT of the test page, then ERASE again. Then RUN.
+- Once the application has run 60 s again, CONFIRM. The IPL trusts the SPL from then on.
+
+```
+SPL update: to 0.2.0, 1800 instructions
+SPL update: keeping the running SPL
+SPL update: erasing
+SPL update: writing 29 chunks
+…
+SPL update: committing
+SPL update: starting the new SPL
+SPL update: testing the new SPL
+SPL update: back to the application
+SPL update: confirming once the application has run 60 s
+SPL update: DONE, 0.2.0 confirmed, <seconds> s
+```
+
+A failure before COMMIT starts a new pass from STATUS, up to three. Meanwhile the IPL starts the application directly, as there is no intact SPL. A new SPL that never comes up (the IPL gives up on it after its trials and starts the application, which rejects it) or fails its test ends `REJECTED`, and the ESP installs the SPL it kept, forced, by itself. If that one is rejected too, or none was kept, the clock carries on with the application started directly by the IPL until an SPL is installed.
+
+`update install` and the daily check do the SPL first, when it is offered and not known to be current (the update's first STATUS ends it at once if it is), then the application once the SPL's update is DONE. Without the update server, `update spl force` installs the newest staged SPL.
 
 `pic boot` prints what the SPL reports (its mode, versions, whether the application is valid) when the PIC is in it, or else the application's version, then how the last update went. `pic boot run` and `pic boot hold` send RUN and HOLD to the SPL. After RUN, or when the SPL has sent no BOOT-STATUS for 5 s with no update running, the ESP stops treating the PIC as in its SPL and its link's traffic resumes, which brings the new application's link into SML mode and its STAT-SYS. `update` lists the staged files (`-v` also the SPL slots), and `update erase pic|spl|all` empties their slots (the sector holding each header is erased).
 

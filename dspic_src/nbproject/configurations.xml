@@ -23,6 +23,7 @@
       <logicalFolder name="esp" displayName="esp" projectFiles="true">
         <itemPath>esp/esp_link.h</itemPath>
         <itemPath>esp/esp_report.h</itemPath>
+        <itemPath>esp/spl_writer.h</itemPath>
         <itemPath>../common/sml_proto.h</itemPath>
         <itemPath>../common/sml.h</itemPath>
       </logicalFolder>
@@ -123,6 +124,7 @@
         <itemPath>esp/esp_report.c</itemPath>
         <itemPath>../common/sml.c</itemPath>
         <itemPath>../common/boot_crc.c</itemPath>
+        <itemPath>esp/spl_writer.c</itemPath>
       </logicalFolder>
       <logicalFolder name="gnss" displayName="gnss" projectFiles="true">
         <itemPath>gnss/gnss.c</itemPath>

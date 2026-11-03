@@ -37,6 +37,10 @@ uint16_t boot_attempts(void);
 void boot_service(uint32_t uptime_s);
 uint16_t boot_healthy_s(void);
 
+// A new SPL committed (esp/spl_writer.h): the mailbox's trials zeroed, its
+// own count from the next start.
+void boot_new_spl(void);
+
 // Leave a request for the SPL to stay (HELD) at the next start. The caller
 // resets once its answer is sent.
 void boot_request_spl(void);

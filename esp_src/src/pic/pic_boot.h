@@ -1,7 +1,8 @@
 /*
  * The PIC's bootloader from the ESP: a PIC application update from a file
  * staged in picfw (pic_store.h), run by pic_update.c from the main loop over
- * the PIC link, and the console's view of the SPL.
+ * the PIC link, an SPL update the same way by spl_update.c, and the console's
+ * view of the SPL.
  *
  * While an update runs the link is quiet (pic_link.h): only its frames reach
  * the PIC. Progress goes to every console as it happens: the step, and the
@@ -23,7 +24,16 @@ void pic_boot_service(void);
 // running already or the store is absent. force: even if the PIC has it
 // already, and past an unconfirmed SPL (which refuses the erase anyway).
 bool pic_boot_update(const PicStoredFile *file, bool force, Stream *output);
+// An SPL update from a staged SPL file (spl_update.h), through the running
+// application. False, said why, if any PIC update is running, the PIC is in
+// its SPL, or the file is not an SPL's. A new SPL that is rejected is
+// followed by the one kept, forced, by itself.
+bool pic_boot_update_spl(const PicStoredFile *file, bool force, Stream *output);
+// Either update running.
 bool pic_boot_updating(void);
+// The last SPL update has ended: true, and done is whether it is DONE.
+// False while one runs, or if none has.
+bool pic_boot_spl_result(bool *done);
 
 // "pic boot": where the PIC is (its application, or its SPL and what the
 // SPL reports), and the last update.

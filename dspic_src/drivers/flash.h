@@ -94,6 +94,13 @@ FlashResult flash_erase_page(uint32_t address);
 // of 4, in the store, erased since it was last written).
 FlashResult flash_write_double_word(uint32_t address, uint16_t first, uint16_t second);
 
+// The SPL's pages (0x000800-0x001FFF, common/boot_layout.h), for the
+// application's SPL writer (esp/spl_writer.h), and nothing else: the guard
+// is the first thing each checks. Whole instruction words, 24 bits.
+uint32_t flash_read_instruction(uint32_t address);
+FlashResult flash_spl_erase_page(uint32_t address);
+FlashResult flash_spl_write(uint32_t address, uint32_t first, uint32_t second);
+
 // A free-running clock to time the operations with (pps_capture_timebase);
 // NULL: not timed.
 void flash_set_clock(uint32_t (*clock)(void));

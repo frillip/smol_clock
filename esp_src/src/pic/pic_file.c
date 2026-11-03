@@ -67,6 +67,33 @@ bool pic_file_parse(const uint8_t header[PIC_FILE_HEADER_BYTES], PicFileHeader *
 }
 
 
+static void put32(uint8_t *p, uint32_t value)
+{
+    p[0] = (uint8_t)(value >> 24);
+    p[1] = (uint8_t)(value >> 16);
+    p[2] = (uint8_t)(value >> 8);
+    p[3] = (uint8_t)value;
+}
+
+
+void pic_file_spl_header(const PicFileHeader *header, uint8_t out[PIC_FILE_HEADER_BYTES])
+{
+    memset(out, 0, PIC_FILE_HEADER_BYTES);
+    memcpy(out, "SMOLSPL", 8);
+    out[9] = FILE_FORMAT;
+    out[11] = PIC_FILE_HEADER_BYTES;
+    put32(out + 12, header->device_id);
+    put32(out + 16, header->version);
+    put32(out + 20, header->min_ipl);
+    out[24] = (uint8_t)(header->protocol >> 8);
+    out[25] = (uint8_t)header->protocol;
+    put32(out + 28, header->build_time);
+    put32(out + 32, header->length);
+    put32(out + 36, header->crc32);
+    put32(out + 60, boot_crc32(out, 60U));
+}
+
+
 uint32_t pic_file_bytes(const PicFileHeader *header)
 {
     return PIC_FILE_HEADER_BYTES + 3U * header->length;

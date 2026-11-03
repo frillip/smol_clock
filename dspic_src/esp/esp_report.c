@@ -1,4 +1,5 @@
 #include "esp_report.h"
+#include "spl_writer.h"
 
 #include <stddef.h>
 #include <stdio.h>
@@ -772,6 +773,21 @@ static void print_boot(void)
     }
     printf("; trials %u, attempts %u, healthy %u s\n", boot_trials(), boot_attempts(),
            boot_healthy_s());
+    {
+        const SplWriterStatus *writer = spl_writer_status();
+
+        if (writer->erases != 0U || writer->rejects != 0U || writer->confirms != 0U ||
+            writer->reject_due || writer->session)
+        {
+            printf("SPL writer: %lu pages erased, %lu chunks, %lu commits, %lu confirms, %lu "
+                   "rejects, %lu failures%s%s\n",
+                   (unsigned long)writer->erases, (unsigned long)writer->chunks,
+                   (unsigned long)writer->commits, (unsigned long)writer->confirms,
+                   (unsigned long)writer->rejects, (unsigned long)writer->failures,
+                   writer->session ? "; ERASED, waiting for its data" : "",
+                   writer->reject_due ? "; reject due" : "");
+        }
+    }
 }
 
 

@@ -18,6 +18,8 @@
 
 #include "console/console.h"
 #include "console/debug.h"
+#include "../common/boot_layout.h"
+#include "drivers/boot_image.h"
 #include "drivers/buzzer.h"
 #include "drivers/flash.h"
 #include "drivers/i2c1.h"
@@ -25,6 +27,7 @@
 #include "drivers/veml6040.h"
 #include "esp/esp_link.h"
 #include "esp/esp_report.h"
+#include "esp/spl_writer.h"
 #include "gnss/gnss.h"
 #include "menu/menu.h"
 #include "platform/boot.h"
@@ -111,6 +114,44 @@ static bool flash_quiet(void)
     return scheduler_slot() <= SETTINGS_STORE_LAST_SLOT && i2c1_idle() &&
            source_rtc_state()->activity == SOURCE_RTC_IDLE;
 }
+
+
+// The SPL writer's flash window: the same quiet time, from the settings
+// store's slot to its last, each time the 10 ms task comes round in it.
+static bool flash_window(void)
+{
+    return scheduler_slot() >= SETTINGS_STORE_SLOT && flash_quiet();
+}
+
+
+// ---- The SPL writer's port (esp/spl_writer.h) ------------------------------
+
+static bool spl_erase(uint32_t address)
+{
+    return flash_spl_erase_page(address) == FLASH_OK;
+}
+
+
+static bool spl_write(uint32_t address, uint32_t first, uint32_t second)
+{
+    return flash_spl_write(address, first, second) == FLASH_OK;
+}
+
+
+static void spl_app(SplWriterApp *app)
+{
+    app->reset_cause = system_reset_cause();
+    app->attempts = boot_attempts();
+    app->boot = boot_path();
+    app->trials = boot_trials();
+    app->healthy_s = boot_healthy_s();
+    app->save_pending = settings_save_pending();
+}
+
+
+static SplWriterPort spl_port = {flash_read_instruction, spl_erase,  spl_write,
+                                 NULL,                   esp_link_send_boot, spl_app,
+                                 boot_new_spl};
 
 
 // The alarm dot follows the alarm, and its changes are printed with
@@ -373,6 +414,15 @@ int main(void)
     flash_set_clock(pps_capture_timebase);
     flash_set_resume_hook(epoch_timer_resume);
     settings_init();
+    // The SPL's pages, for the ESP's SPL update; the IPL's CRC-32 service
+    // when the IPL is there (without it 0x000200 is not code).
+    {
+        BootIpl ipl;
+
+        boot_image_ipl(&ipl);
+        spl_port.crc32 = ipl.present ? ipl_crc32_flash : NULL;
+    }
+    spl_writer_init(&spl_port);
     // Now the saved debug mask is in force.
     timing_report_sync(&capture_sync, debug_enabled(DEBUG_TIMING));
     settings_print_start(debug_enabled(DEBUG_EVENTS));
@@ -424,6 +474,7 @@ int main(void)
         {
             service_gnss();
             esp_link_service(scheduler_now_ms());
+            spl_writer_service(scheduler_epoch(), flash_window());
             source_ntp_service(scheduler_now_ms());
             i2c1_service(scheduler_now_ms());
             brightness_service();
@@ -442,7 +493,8 @@ int main(void)
 
         if (scheduler_due(&settings_store))
         {
-            settings_service(scheduler_epoch(), flash_quiet());
+            // Not while the SPL writer is erasing, committing or confirming.
+            settings_service(scheduler_epoch(), flash_quiet() && !spl_writer_owns_flash());
         }
     }
 }

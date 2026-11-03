@@ -393,6 +393,60 @@ static PicDue pic_due(const ManifestEntry *entry, bool force, uint32_t *running)
     return PIC_DUE;
 }
 
+// The PIC's SPL as last reported: any BOOT-STATUS since the ESP started (the
+// SPL's own at each reset, the application's to an SPL update's STATUS).
+// trusted: committed, intact, confirmed and not rejected. False if none.
+static bool spl_running(uint32_t *version, bool *trusted)
+{
+    SML_BOOT_STATUS_PAYLOAD status;
+    const uint8_t wanted = SML_SPL_STATE_COMMITTED | SML_SPL_STATE_INTACT | SML_SPL_STATE_CONFIRMED;
+
+    if (!pic_link_get(SML_CLASS_BOOT, SML_BOOT_STATUS, &status, UINT32_MAX))
+    {
+        return false;
+    }
+    *version = status.spl_version;
+    *trusted = (status.spl_state & (wanted | SML_SPL_STATE_REJECTED)) == wanted;
+    return true;
+}
+
+
+typedef enum
+{
+    SPL_NOT_OFFERED,
+    SPL_NOT_KNOWN, // no BOOT-STATUS heard: the update's STATUS decides
+    SPL_CURRENT,
+    SPL_WAITS_FOR_ESP,
+    SPL_DUE,
+} SplDue;
+
+static SplDue spl_due(const ManifestEntry *entry, bool force, uint32_t *running)
+{
+    uint32_t offered;
+    bool trusted = false;
+    int order = 0;
+
+    *running = 0;
+    if (!entry->pic_spl.present || !pic_file_version(entry->pic_spl.version, &offered))
+    {
+        return SPL_NOT_OFFERED;
+    }
+    if (entry->esp.present && manifest_compare_versions(entry->esp.version, ESP_VERSION, &order) &&
+        order > 0)
+    {
+        return SPL_WAITS_FOR_ESP;
+    }
+    if (!spl_running(running, &trusted))
+    {
+        return force ? SPL_DUE : SPL_NOT_KNOWN;
+    }
+    if (!force && trusted && offered <= *running)
+    {
+        return SPL_CURRENT;
+    }
+    return SPL_DUE;
+}
+
 // ---- Installing ----------------------------------------------------------------
 
 static bool esp_sink(void *context, const uint8_t *data, size_t length)
@@ -439,23 +493,24 @@ static bool pic_sink(void *context, const uint8_t *data, size_t length)
 }
 
 
-// The manifest's PIC application downloaded into a slot, checked. what
-// prefixes what is printed. False, said why, if it failed.
-static bool stage_pic(const ManifestEntry *entry, uint8_t slot, PicStoredFile *file,
-                      const char *what, Stream *output)
+// A PIC file the manifest names (the application's, or the SPL's) downloaded
+// into a slot of its kind, checked. what prefixes what is printed. False,
+// said why, if it failed.
+static bool stage_file(const ManifestComponent *component, PicFileKind kind, uint8_t slot,
+                       PicStoredFile *file, const char *what, Stream *output)
 {
     static PicStoreWriter writer; // big: not on the stack
     PicStoreResult stored;
     int result;
 
-    stored = pic_store_begin(&writer, PIC_FILE_APP, slot, entry->pic.size);
+    stored = pic_store_begin(&writer, kind, slot, component->size);
     if (stored != PIC_STORE_OK)
     {
         output->printf("%s: staging: %s\n", what, pic_store_result_name(stored));
         return false;
     }
     progress_output = output;
-    result = download(&entry->pic, pic_sink, &writer);
+    result = download(component, pic_sink, &writer);
     progress_output = NULL;
     if (result != RESULT_UPDATE_OK)
     {
@@ -465,7 +520,7 @@ static bool stage_pic(const ManifestEntry *entry, uint8_t slot, PicStoredFile *f
         print_result(output, text, result);
         return false;
     }
-    stored = pic_store_finish(&writer, entry->pic.sha256, file);
+    stored = pic_store_finish(&writer, component->sha256, file);
     if (stored != PIC_STORE_OK)
     {
         output->printf("%s: staging: %s\n", what, pic_store_result_name(stored));
@@ -516,7 +571,7 @@ static bool install_pic(const ManifestEntry *entry, uint32_t running, bool force
         uint8_t slot = pic_store_choose(PIC_FILE_APP, running);
 
         output->printf("PIC update: downloading %s into slot %u\n", entry->pic.version, slot);
-        if (!stage_pic(entry, slot, &file, "PIC update", output))
+        if (!stage_file(&entry->pic, PIC_FILE_APP, slot, &file, "PIC update", output))
         {
             return false;
         }
@@ -534,6 +589,117 @@ static bool install_pic(const ManifestEntry *entry, uint32_t running, bool force
         return false;
     }
     return pic_boot_update(&file, force, output);
+}
+
+
+// The PIC's SPL into picfw, unless a slot holds it already; then its install
+// from there through the application, run by pic_boot. False, said why, if
+// not started.
+static bool install_spl(const ManifestEntry *entry, bool force, Stream *output)
+{
+    PicStoredFile file;
+    uint32_t offered = 0;
+    uint32_t running = 0;
+    bool trusted;
+
+    (void)pic_file_version(entry->pic_spl.version, &offered);
+    if (!pic_store_present())
+    {
+        output->printf("SPL update: no picfw partition: reflash the ESP over USB\n");
+        return false;
+    }
+    if (pic_boot_updating())
+    {
+        output->printf("SPL update: a PIC update is running already\n");
+        return false;
+    }
+    if (pic_store_find(PIC_FILE_SPL, offered, entry->pic_spl.sha256, &file))
+    {
+        output->printf("SPL update: %s already staged in SPL slot %u\n", entry->pic_spl.version,
+                       file.slot);
+    }
+    else
+    {
+        uint8_t slot;
+
+        (void)spl_running(&running, &trusted);
+        slot = pic_store_choose(PIC_FILE_SPL, running);
+        output->printf("SPL update: downloading %s into SPL slot %u\n", entry->pic_spl.version,
+                       slot);
+        if (!stage_file(&entry->pic_spl, PIC_FILE_SPL, slot, &file, "SPL update", output))
+        {
+            return false;
+        }
+    }
+    if (file.header.version != offered)
+    {
+        (void)pic_store_erase(PIC_FILE_SPL, file.slot);
+        output->printf("SPL update: the file holds another version than the manifest says: SPL "
+                       "slot %u emptied\n",
+                       file.slot);
+        return false;
+    }
+    return pic_boot_update_spl(&file, force, output);
+}
+
+
+static void stage_offered(const ManifestEntry *entry, Stream *output);
+static void stage_offered_spl(const ManifestEntry *entry, Stream *output);
+
+// The application's update after an SPL update (automatic, "update pull"):
+// the manifest it was offered with, once no PIC update runs.
+static bool app_after_spl;
+static ManifestEntry chained;
+
+// The PIC's updates in order: its SPL when offered and not known to be
+// current (the update's own STATUS ends it at once if it is), then the
+// application, chained. Else the application if due, else staging.
+static void pic_updates(const ManifestEntry *entry, Stream *output)
+{
+    uint32_t running_version;
+    SplDue due = spl_due(entry, false, &running_version);
+
+    if ((due == SPL_DUE || due == SPL_NOT_KNOWN) && install_spl(entry, false, output))
+    {
+        chained = *entry;
+        app_after_spl = true;
+        return;
+    }
+    if (pic_due(entry, false, &running_version) == PIC_DUE)
+    {
+        (void)install_pic(entry, running_version, false, output);
+        return;
+    }
+    stage_offered(entry, output);
+}
+
+
+// Often: the application's update once the SPL's has ended.
+static void chain_service(void)
+{
+    bool done = false;
+    uint32_t running_version;
+    Stream *output = &Serial;
+
+    if (!app_after_spl || pic_boot_updating())
+    {
+        return;
+    }
+    app_after_spl = false;
+    if (!pic_boot_spl_result(&done) || !done)
+    {
+        console_printf("PIC update: not after an SPL update that did not finish\n");
+        return;
+    }
+    note_pic();
+    if (pic_due(&chained, false, &running_version) == PIC_DUE)
+    {
+        (void)install_pic(&chained, running_version, false, output);
+    }
+    else
+    {
+        stage_offered(&chained, output);
+    }
 }
 
 
@@ -558,7 +724,7 @@ static void stage_offered(const ManifestEntry *entry, Stream *output)
     slot = pic_store_choose(PIC_FILE_APP, running);
     output->printf("PIC: staging %s%s into slot %u\n", entry->pic.version,
                    offered == running ? ", the application it runs," : "", slot);
-    if (!stage_pic(entry, slot, &file, "PIC staging", output))
+    if (!stage_file(&entry->pic, PIC_FILE_APP, slot, &file, "PIC staging", output))
     {
         return;
     }
@@ -571,6 +737,40 @@ static void stage_offered(const ManifestEntry *entry, Stream *output)
         return;
     }
     output->printf("PIC: %s staged in slot %u\n", entry->pic.version, slot);
+}
+
+
+// The manifest's SPL into picfw likewise, if no slot holds it.
+static void stage_offered_spl(const ManifestEntry *entry, Stream *output)
+{
+    PicStoredFile file;
+    uint32_t offered = 0;
+    uint32_t running = 0;
+    bool trusted;
+    uint8_t slot;
+
+    if (!pic_store_present() || pic_boot_updating() || !entry->pic_spl.present ||
+        !pic_file_version(entry->pic_spl.version, &offered) ||
+        pic_store_find(PIC_FILE_SPL, offered, entry->pic_spl.sha256, &file))
+    {
+        return;
+    }
+    (void)spl_running(&running, &trusted);
+    slot = pic_store_choose(PIC_FILE_SPL, running);
+    output->printf("PIC: staging SPL %s into SPL slot %u\n", entry->pic_spl.version, slot);
+    if (!stage_file(&entry->pic_spl, PIC_FILE_SPL, slot, &file, "SPL staging", output))
+    {
+        return;
+    }
+    if (file.header.version != offered)
+    {
+        (void)pic_store_erase(PIC_FILE_SPL, slot);
+        output->printf("SPL staging: the file holds another version than the manifest says: SPL "
+                       "slot %u emptied\n",
+                       slot);
+        return;
+    }
+    output->printf("PIC: SPL %s staged in SPL slot %u\n", entry->pic_spl.version, slot);
 }
 
 
@@ -603,6 +803,30 @@ static void install_offline(Stream *output, bool force)
     output->printf("PIC update: without the update server, the staged %s from slot %u\n", text,
                    file.slot);
     (void)pic_boot_update(&file, force, output);
+}
+
+// No manifest: a staged SPL instead, forced only: the newest.
+static void install_spl_offline(Stream *output, bool force)
+{
+    PicStoredFile file;
+    char text[16];
+
+    if (!pic_store_present() || pic_boot_updating() || !pic_store_pick(PIC_FILE_SPL, 0, &file))
+    {
+        output->printf("SPL: nothing staged to install without the update server\n");
+        return;
+    }
+    pic_report_version(text, sizeof(text), file.header.version);
+    if (!force)
+    {
+        output->printf("SPL: \"update spl force\" installs the staged %s without the update "
+                       "server\n",
+                       text);
+        return;
+    }
+    output->printf("SPL update: without the update server, the staged %s from SPL slot %u\n", text,
+                   file.slot);
+    (void)pic_boot_update_spl(&file, force, output);
 }
 
 // ---- Commands ------------------------------------------------------------------
@@ -638,10 +862,25 @@ static void print_offers(Stream *output, const ManifestEntry *entry)
                        running != 0U ? text : "nothing");
         break;
     }
-    if (entry->pic_spl.present)
+    switch (spl_due(entry, false, &running))
     {
-        output->printf("PIC SPL: %s offered, not installed: SPL updates are not supported yet\n",
+    case SPL_NOT_OFFERED: break;
+    case SPL_NOT_KNOWN:
+        output->printf("SPL: %s offered, the PIC's SPL not heard from (its update asks)\n",
                        entry->pic_spl.version);
+        break;
+    case SPL_CURRENT:
+        pic_report_version(text, sizeof(text), running);
+        output->printf("SPL: %s offered, up to date (%s)\n", entry->pic_spl.version, text);
+        break;
+    case SPL_WAITS_FOR_ESP:
+        output->printf("SPL: %s offered, after the ESP's update\n", entry->pic_spl.version);
+        break;
+    case SPL_DUE:
+        pic_report_version(text, sizeof(text), running);
+        output->printf("SPL: %s offered, UPDATE AVAILABLE (runs %s)\n", entry->pic_spl.version,
+                       running != 0U ? text : "none");
+        break;
     }
 }
 
@@ -678,8 +917,10 @@ bool updater_check(Stream *output)
     }
     available = esp_due(&entry, false);
     pic_available = pic_due(&entry, false, &running_version) == PIC_DUE;
+    pic_available = pic_available || spl_due(&entry, false, &running_version) == SPL_DUE;
     print_offers(output, &entry);
     stage_offered(&entry, output);
+    stage_offered_spl(&entry, output);
     return available || pic_available;
 }
 
@@ -718,13 +959,15 @@ void updater_pull(Stream *output)
         install_esp_reported(output, &entry, false);
         return;
     }
-    if (pic_due(&entry, false, &running_version) == PIC_DUE)
+    if (spl_due(&entry, false, &running_version) == SPL_DUE ||
+        pic_due(&entry, false, &running_version) == PIC_DUE)
     {
-        (void)install_pic(&entry, running_version, false, output);
+        pic_updates(&entry, output);
         return;
     }
     print_offers(output, &entry);
     stage_offered(&entry, output);
+    stage_offered_spl(&entry, output);
 }
 
 
@@ -754,8 +997,27 @@ void updater_esp(Stream *output, bool force)
 
 void updater_spl(Stream *output, bool force)
 {
-    (void)force;
-    output->printf("PIC SPL: updates are not supported yet\n");
+    ManifestEntry entry;
+    uint32_t running_version;
+
+    if (!start(output, &entry))
+    {
+        install_spl_offline(output, force);
+        return;
+    }
+    switch (spl_due(&entry, force, &running_version))
+    {
+    case SPL_DUE:
+    case SPL_NOT_KNOWN: (void)install_spl(&entry, force, output); break;
+    case SPL_NOT_OFFERED: output->printf("SPL: nothing offered\n"); break;
+    case SPL_CURRENT:
+        output->printf("SPL: up to date (force to install it again)\n");
+        stage_offered_spl(&entry, output);
+        break;
+    case SPL_WAITS_FOR_ESP:
+        output->printf("SPL: the ESP's update first (%s)\n", entry.esp.version);
+        break;
+    }
 }
 
 
@@ -790,9 +1052,9 @@ void updater_service(bool have_local, uint32_t local_seconds)
     uint32_t day = local_seconds / 86400;
     uint32_t hour = local_seconds / 3600 % 24;
     ManifestEntry entry;
-    uint32_t running_version;
     Stream *output = &Serial;
 
+    chain_service();
     if (!have_local)
     {
         return;
@@ -804,7 +1066,7 @@ void updater_service(bool have_local, uint32_t local_seconds)
         checked_day = hour == user_prefs.fields.updater.flags.auto_time ? day : day - 1;
     }
     if (!user_prefs.fields.updater.flags.auto_enabled || checked_day == day ||
-        hour != user_prefs.fields.updater.flags.auto_time || pic_boot_updating())
+        hour != user_prefs.fields.updater.flags.auto_time || pic_boot_updating() || app_after_spl)
     {
         return;
     }
@@ -818,13 +1080,10 @@ void updater_service(bool have_local, uint32_t local_seconds)
     {
         install_esp_reported(output, &entry, true);
     }
-    else if (pic_due(&entry, false, &running_version) == PIC_DUE)
-    {
-        (void)install_pic(&entry, running_version, false, output);
-    }
     else
     {
-        stage_offered(&entry, output);
+        pic_updates(&entry, output);
+        stage_offered_spl(&entry, output);
     }
 }
 
@@ -843,5 +1102,5 @@ bool updater_pic_is_available(void)
 
 bool updater_is_running(void)
 {
-    return running || pic_boot_updating();
+    return running || pic_boot_updating() || app_after_spl;
 }

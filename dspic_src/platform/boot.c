@@ -70,6 +70,15 @@ uint16_t boot_healthy_s(void)
 }
 
 
+void boot_new_spl(void)
+{
+    if (valid)
+    {
+        mailbox.trials = 0;
+    }
+}
+
+
 void boot_request_spl(void)
 {
     if (valid)

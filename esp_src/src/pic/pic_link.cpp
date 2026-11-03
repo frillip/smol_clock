@@ -60,6 +60,7 @@ static Pending pending[PENDING_MAX];
 static PicCommandHandler command_handler;
 static PicFrameHook frame_hook;
 static bool in_spl;
+static bool link_held; // pic_link_hold(): an SPL update waits on the application's flash
 static PicTime pic_time;
 static Settings settings;
 static uint16_t next_token = 1;
@@ -102,7 +103,7 @@ void pic_link_send(uint8_t class_id, uint8_t message_id, const void *native)
     uint8_t frame[SML_MAX_FRAME_BYTES];
     uint16_t length;
 
-    if (in_spl && class_id != SML_CLASS_BOOT)
+    if ((in_spl || link_held) && class_id != SML_CLASS_BOOT)
     {
         stats.held_back++;
         return;
@@ -175,11 +176,12 @@ uint16_t pic_link_request(uint16_t command, uint32_t argument, Stream *reply_to,
     SML_CMD_USER_PAYLOAD request;
     Pending *slot;
 
-    if (in_spl)
+    if (in_spl || link_held)
     {
         if (reply_to != NULL)
         {
-            reply_to->printf("PIC %s: not sent, the PIC is in its SPL (pic boot)\n",
+            reply_to->printf(in_spl ? "PIC %s: not sent, the PIC is in its SPL (pic boot)\n"
+                                    : "PIC %s: not sent, the PIC's SPL is being written\n",
                              pic_report_command_name(command));
         }
         stats.held_back++;
@@ -677,6 +679,12 @@ void pic_link_set_command_handler(PicCommandHandler handler)
 void pic_link_set_frame_hook(PicFrameHook hook)
 {
     frame_hook = hook;
+}
+
+
+void pic_link_hold(bool on)
+{
+    link_held = on;
 }
 
 

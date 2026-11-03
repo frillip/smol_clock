@@ -94,6 +94,7 @@ typedef struct
     uint32_t text_frames; // STAT-DEBUG frames
     uint32_t tx_waits;    // frames that had to wait for TX ring space
     uint32_t rx_errors;   // UART errors (each loses the partial frame)
+    uint32_t boot_frames; // class 0xF0, to the SPL writer
 } EspLinkStats;
 
 // After console_init(), which starts UART1.
@@ -121,6 +122,8 @@ bool esp_link_response(SML_CMD_RESPONSE_PAYLOAD *response);
 
 // Sends one frame now, waiting for TX ring space if need be.
 void esp_link_send(uint8_t class_id, uint8_t message_id, const void *native);
+// A class 0xF0 message, its wire payload (the SPL writer's).
+void esp_link_send_boot(uint8_t message_id, const uint8_t *payload, uint16_t length);
 
 void esp_link_print(void);
 

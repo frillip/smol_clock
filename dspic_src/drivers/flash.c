@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <xc.h>
 
+#include "../../common/boot_layout.h"
+
 // NVMCON: WREN with the operation.
 #define NVMCON_WRITE_DOUBLE_WORD 0x4001U
 #define NVMCON_ERASE_PAGE        0x4003U
@@ -139,6 +141,74 @@ FlashResult flash_erase_page(uint32_t address)
         stats.longest_erase_ticks = stats.last_erase_ticks;
     }
     stats.erases++;
+    return finish();
+}
+
+
+// The SPL's pages: the only flash outside the store the application writes.
+static bool in_spl(uint32_t address, uint32_t alignment)
+{
+    return address >= SPL_START && address < SPL_END && (address & (alignment - 1UL)) == 0UL;
+}
+
+
+uint32_t flash_read_instruction(uint32_t address)
+{
+    uint16_t saved = TBLPAG;
+    uint16_t low;
+    uint16_t high;
+
+    TBLPAG = (uint16_t)(address >> 16);
+    low = __builtin_tblrdl((uint16_t)address);
+    high = __builtin_tblrdh((uint16_t)address);
+    TBLPAG = saved;
+    return (uint32_t)(high & 0x00FFU) << 16 | low;
+}
+
+
+FlashResult flash_spl_erase_page(uint32_t address)
+{
+    if (!in_spl(address, FLASH_PAGE_ADDRESSES))
+    {
+        return FLASH_BAD_ADDRESS;
+    }
+    NVMCON = NVMCON_ERASE_PAGE;
+    NVMADRU = (uint16_t)(address >> 16);
+    NVMADR = (uint16_t)address;
+    stats.last_erase_ticks = run_operation();
+    if (stats.last_erase_ticks > stats.longest_erase_ticks)
+    {
+        stats.longest_erase_ticks = stats.last_erase_ticks;
+    }
+    stats.erases++;
+    return finish();
+}
+
+
+FlashResult flash_spl_write(uint32_t address, uint32_t first, uint32_t second)
+{
+    uint16_t saved = TBLPAG;
+    uint32_t ticks;
+
+    if (!in_spl(address, FLASH_DOUBLE_ADDRESSES))
+    {
+        return FLASH_BAD_ADDRESS;
+    }
+    NVMCON = NVMCON_WRITE_DOUBLE_WORD;
+    NVMADRU = (uint16_t)(address >> 16);
+    NVMADR = (uint16_t)address;
+    TBLPAG = LATCH_PAGE;
+    __builtin_tblwtl(0U, (uint16_t)first);
+    __builtin_tblwth(0U, (uint16_t)(first >> 16) & 0x00FFU);
+    __builtin_tblwtl(2U, (uint16_t)second);
+    __builtin_tblwth(2U, (uint16_t)(second >> 16) & 0x00FFU);
+    ticks = run_operation();
+    TBLPAG = saved;
+    if (ticks > stats.longest_write_ticks)
+    {
+        stats.longest_write_ticks = ticks;
+    }
+    stats.writes++;
     return finish();
 }
 

@@ -44,6 +44,10 @@ typedef struct
 // is written to, an even length). False if any is wrong.
 bool pic_file_parse(const uint8_t header[PIC_FILE_HEADER_BYTES], PicFileHeader *out);
 
+// An SPL file's header, as make_image.py spl writes it, from a header's
+// fields (device_id, version, min_ipl, protocol, build_time, length, crc32).
+void pic_file_spl_header(const PicFileHeader *header, uint8_t out[PIC_FILE_HEADER_BYTES]);
+
 // The whole file's size: header and packed image.
 uint32_t pic_file_bytes(const PicFileHeader *header);
 

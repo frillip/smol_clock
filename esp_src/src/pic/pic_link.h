@@ -98,6 +98,9 @@ bool pic_link_in_spl(void);
 // starts in TEXT mode and sends nothing until a frame arrives): the link's
 // own traffic resumes, and its STAT-SYS follows. why is printed.
 void pic_link_left_spl(const char *why);
+// While an SPL update waits on the application's answer (its flash may be
+// busy, the CPU stalled): nothing but class 0xF0 goes out, as in the SPL.
+void pic_link_hold(bool on);
 // A frame whose payload is already in wire order, sent whatever the mode.
 void pic_link_send_wire(uint8_t class_id, uint8_t message_id, const uint8_t *payload,
                         uint16_t length);
