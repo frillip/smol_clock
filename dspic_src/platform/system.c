@@ -1,71 +1,27 @@
 #include "system.h"
 
-// Configuration bits
+#include "../../common/boot_layout.h"
+#include "boot.h"
 
-// FICD
-// ICD Communication Channel Select bits: Communicate on PGEC2 and PGED2
-#pragma config ICS = PGD2
-// JTAG Enable bit: JTAG is disabled
-#pragma config JTAGEN = OFF
-
-// FPOR
-// Alternate I2C1 pins: I2C1 mapped to ASDA1/ASCL1 (RB9/RB8), where the RTC
-// and sensors are wired. As V2. OFF would put I2C1 on SDA1/SCL1 instead.
-#pragma config ALTI2C1 = ON
-// Alternate I2C2 pins: I2C2 mapped to SDA2/SCL2 pins
-#pragma config ALTI2C2 = OFF
-// Watchdog Window Select bits: WDT Window is 25% of WDT period
-#pragma config WDTWIN = WIN25
-
-// FWDT
-// Watchdog Timer Postscaler bits: 1:32768
-#pragma config WDTPOST = PS32768
-// Watchdog Timer Prescaler bit: 1:128
-#pragma config WDTPRE = PR128
-// PLL Lock Enable bit: Clock switch to PLL source will wait until the PLL lock signal is valid.
-#pragma config PLLKEN = ON
-// Watchdog Timer Window Enable bit: Watchdog Timer in Non-Window mode
-#pragma config WINDIS = OFF
-// Watchdog Timer Enable bit: Watchdog timer enabled/disabled by user software
-#pragma config FWDTEN = OFF
-
-// FOSC
-// Primary Oscillator Mode Select bits: EC (External Clock) Mode
-#pragma config POSCMD = EC
-// OSC2 Pin Function bit: OSC2 is general purpose digital I/O pin
-#pragma config OSCIOFNC = ON
-// Peripheral pin select configuration: Allow multiple reconfigurations
-#pragma config IOL1WAY = OFF
-// Clock Switching Mode bits: Clock switching is enabled,Fail-safe Clock Monitor is disabled
-#pragma config FCKSM = CSECMD
-
-// FOSCSEL
-// Oscillator Source Selection: FRC
-#pragma config FNOSC = FRC
-// Two-speed Oscillator Start-up Enable bit: Start up with user-selected oscillator source
-#pragma config IESO = OFF
-
-// FGS
-// General Segment Write-Protect bit: General Segment may be written
-#pragma config GWRP = OFF
-// General Segment Code-Protect bit: General Segment Code protect is Disabled
-#pragma config GCP = OFF
+// The configuration words are the IPL's (dspic_ipl/ipl_config.c),
+// programmed once with it: an application image carries none. Programmed
+// without the IPL, the chip runs on the erased configuration words'
+// defaults, which this firmware does not expect.
 
 static void clock_init(void);
 
-// RCON as found at start-up: why the PIC last reset.
+// Why the PIC last reset, at start-up: from the IPL's mailbox (boot.h).
 static uint16_t reset_cause;
-
-// RCON's reset-cause bits (the rest are controls and status: SWDTEN,
-// VREGS, VREGSF, SLEEP, IDLE).
-#define RCON_CAUSES 0xC2D3U // TRAPR IOPUWR CM EXTR SWR WDTO BOR POR
 
 void system_init(void)
 {
+    uint16_t rcon = RCON;
+
     // First, before anything can reset again: the bits stay set until
     // cleared, so clearing them now makes the next reset's cause its own.
-    reset_cause = RCON;
-    RCON = (uint16_t)(RCON & ~RCON_CAUSES);
+    // The IPL has cleared them already and left the cause in the mailbox.
+    RCON = (uint16_t)(RCON & ~BOOT_RESET_CAUSES);
+    reset_cause = boot_init(rcon);
     board_init();
     clock_init();
     // Interrupt priorities are set by the module that owns each interrupt:

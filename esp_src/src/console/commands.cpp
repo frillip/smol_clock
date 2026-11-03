@@ -1069,7 +1069,7 @@ static const Entry pic_entries[] = {
     {"defaults", VALUE_NONE, NULL, 0, 0, "", "The PIC's default settings, not saved", pic_action},
     {"reset", VALUE_NONE, NULL, 0, 0, "", "Reset the PIC", pic_action},
     {"resync", VALUE_NONE, NULL, 0, 0, "", "Judge every source again and choose again", pic_action},
-    {"bootloader", VALUE_NONE, NULL, 0, 0, "", "Enter the bootloader (not yet)", pic_action},
+    {"bootloader", VALUE_NONE, NULL, 0, 0, "", "Enter the bootloader (the SPL)", pic_action},
 };
 
 // ---- NTP, Wi-Fi, Telnet, updates ---------------------------------------------------

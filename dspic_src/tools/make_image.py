@@ -5,11 +5,15 @@
       image from 0x002000. Version from platform/version.h.
   make_image.py spl <spl.hex> -o spl.smolspl --version X.Y.Z [--min-ipl X.Y.Z]
       The SPL file: a 64-byte header, then the packed code from 0x000800.
-  make_image.py install --ipl <ipl.hex> --spl <spl.hex> --app <app.hex>
-                        --spl-version X.Y.Z -o first.hex
+  make_image.py install --ipl <ipl.hex> [--spl <spl.hex> --spl-version X.Y.Z]
+                        --app <app.hex> -o first.hex
       The first-installation hex, for a PICkit: the IPL with the configuration
       words, the SPL with its record committed and confirmed, the application
-      with its record committed.
+      with its record committed. Without an SPL, the IPL starts the
+      application directly (until the SPL exists, and for testing).
+  make_image.py ipl <ipl.hex> -o ipl-X.Y.Z.hex [--build-time S]
+      The IPL hex to release: page 0 checked (reset, services, IVT, info
+      block), the info block's build time and CRC-16 filled in.
   make_image.py info <file>
       A file's header, checked, and its image's CRC-32.
 
@@ -365,21 +369,80 @@ def build_spl(path, version, min_ipl, build_time, warn):
     return spl_header(length, version, min_ipl, boot_protocol(), crc, build_time) + image
 
 
+# ---- The IPL ----------------------------------------------------------------------
+
+def ipl_info_crc(words):
+    """CRC-16/IBM-3740 of page 0 below the info block, packed."""
+    count = L["IPL_INFO_ADDRESS"] // 2
+    return crc16(pack(words, L["IPL_START"], count))
+
+
+def check_ipl(words, path):
+    """Page 0 as the IPL must leave it: the reset GOTO and the services GOTO
+    into its code, every interrupt at its forwarding slot, the traps into its
+    code, the info block's magic. Returns the info block's words."""
+    code = (L["IPL_SERVICES"] + 4, L["IPL_INFO_ADDRESS"])
+    target = goto_target(words, L["IPL_START"])
+    if target is None or not code[0] <= target < code[1]:
+        raise ImageError("%s: the reset vector does not go into the IPL's code" % path)
+    target = goto_target(words, L["IPL_SERVICES"])
+    if target is None or not code[0] <= target < code[1]:
+        raise ImageError("%s: no GOTO into the IPL's code at IPL_SERVICES 0x%06X" % (path, L["IPL_SERVICES"]))
+    for index in range(L["APP_VECTORS"]):
+        entry = words.get(4 + 2 * index)
+        if index < 8:
+            if entry is None or not code[0] <= entry < code[1]:
+                raise ImageError("%s: trap vector %d not to a stub in the IPL" % (path, index))
+        elif entry != L["APP_FORWARD_TABLE"] + 4 * index:
+            raise ImageError("%s: IVT entry %d not to its forwarding slot" % (path, index))
+    info = [words.get(L["IPL_INFO_ADDRESS"] + 2 * i, ERASED) & 0xFFFF for i in range(L["IPL_INFO_WORDS"])]
+    if info[0] != L["IPL_INFO_MAGIC_VALUE"] or info[1] != L["RECORD_FORMAT_1"]:
+        raise ImageError("%s: no info block at 0x%06X" % (path, L["IPL_INFO_ADDRESS"]))
+    return info
+
+
+def build_ipl(path, build_time, warn):
+    """The release hex: checked, with the info block's build time and CRC."""
+    words, config = split_config(read_hex(path))
+    take_region(words, L["IPL_START"], L["IPL_END"], path)
+    if not config:
+        warn("%s: no configuration words: the IPL's hex should hold them" % path)
+    info = check_ipl(words, path)
+
+    def put(index, value):
+        address = L["IPL_INFO_ADDRESS"] + 2 * index
+        words[address] = (words.get(address, ERASED) & 0xFF0000) | value
+
+    put(L["IPL_INFO_BUILD_TIME"], build_time >> 16 & 0xFFFF)
+    put(L["IPL_INFO_BUILD_TIME"] + 1, build_time & 0xFFFF)
+    put(L["IPL_INFO_CRC"], ipl_info_crc(words))
+    version = info[L["IPL_INFO_VERSION"]] << 16 | info[L["IPL_INFO_VERSION"] + 1]
+    used = [a for a in words if a < L["IPL_INFO_ADDRESS"]]
+    summary = "IPL %s, %d instructions below the info block, CRC-16 0x%04X" % (
+        version_text(version), len(used), words[L["IPL_INFO_ADDRESS"] + 2 * L["IPL_INFO_CRC"]] & 0xFFFF)
+    words.update(config)
+    return words, summary
+
+
 def build_install(ipl_path, spl_path, app_path, spl_version, build_time, warn):
     ipl, config = split_config(read_hex(ipl_path))
     take_region(ipl, L["IPL_START"], L["IPL_END"], ipl_path)
     if not config:
         raise ImageError("%s: no configuration words: the IPL's hex must hold them" % ipl_path)
-    spl = spl_words(spl_path, warn)
+    info = check_ipl(ipl, ipl_path)
+    if info[L["IPL_INFO_CRC"]] != ipl_info_crc(ipl):
+        warn("%s: the info block's CRC-16 is not filled in: not a released IPL (make_image.py ipl)" % ipl_path)
     app = app_words(app_path, warn)
     out = dict(ipl)
     out.update(config)
 
-    length = image_length(spl, L["SPL_START"])
-    crc = zlib.crc32(pack(spl, L["SPL_START"], length)) & 0xFFFFFFFF
-    out.update(spl)
-    out.update(record_instructions(L["SPL_RECORD_ADDRESS"],
-                                   spl_record(spl_version, length, crc, build_time, boot_protocol(), True)))
+    if spl_path is not None:
+        spl = spl_words(spl_path, warn)
+        length = image_length(spl, L["SPL_START"])
+        crc = zlib.crc32(pack(spl, L["SPL_START"], length)) & 0xFFFFFFFF
+        out.update(spl)
+        out.update(record_instructions(L["SPL_RECORD_ADDRESS"],
+                                       spl_record(spl_version, length, crc, build_time, boot_protocol(), True)))
 
     length = image_length(app, L["APP_START"])
     crc = zlib.crc32(pack(app, L["APP_START"], length)) & 0xFFFFFFFF
@@ -423,9 +486,13 @@ def main(argv=None):
     p.add_argument("--build-time", type=int)
     p = sub.add_parser("install")
     p.add_argument("--ipl", required=True)
-    p.add_argument("--spl", required=True)
+    p.add_argument("--spl")
     p.add_argument("--app", required=True)
-    p.add_argument("--spl-version", required=True)
+    p.add_argument("--spl-version")
+    p.add_argument("-o", "--output", required=True)
+    p.add_argument("--build-time", type=int)
+    p = sub.add_parser("ipl")
+    p.add_argument("hex")
     p.add_argument("-o", "--output", required=True)
     p.add_argument("--build-time", type=int)
     p = sub.add_parser("info")
@@ -440,17 +507,25 @@ def main(argv=None):
             with open(args.file, "rb") as handle:
                 print(describe(parse_file(handle.read())))
             return 0
+        if args.action == "ipl":
+            words, summary = build_ipl(args.hex, args.build_time or default_build_time(args.hex), warn)
+            write_hex(args.output, words)
+            print("wrote %s: %s" % (args.output, summary))
+            return 0
         if args.action == "app":
             data = build_app(args.hex, args.build_time or default_build_time(args.hex), warn)
         elif args.action == "spl":
             data = build_spl(args.hex, parse_version(args.version), parse_version(args.min_ipl),
                              args.build_time or default_build_time(args.hex), warn)
         else:
-            words = build_install(args.ipl, args.spl, args.app, parse_version(args.spl_version),
+            if (args.spl is None) != (args.spl_version is None):
+                raise ImageError("--spl and --spl-version go together")
+            words = build_install(args.ipl, args.spl, args.app,
+                                  parse_version(args.spl_version) if args.spl else None,
                                   args.build_time or default_build_time(args.app), warn)
             write_hex(args.output, words)
-            print("wrote %s: IPL, SPL (committed, confirmed), application (committed), configuration words"
-                  % args.output)
+            print("wrote %s: IPL, %sapplication (committed), configuration words"
+                  % (args.output, "SPL (committed, confirmed), " if args.spl else "no SPL, "))
             return 0
         with open(args.output, "wb") as handle:
             handle.write(data)

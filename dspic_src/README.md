@@ -10,7 +10,11 @@ This firmware replaces the V2 firmware and the MCC-generated code it was built o
 
 # Building
 
-The project is an MPLAB X project in [nbproject](nbproject), built with XC16 2.10 for the dsPIC33EP256GP504. No MCC is involved: the configuration bits, clock set-up and peripheral set-up are all in the source.
+The project is an MPLAB X project in [nbproject](nbproject), built with XC16 2.10 for the dsPIC33EP256GP504. No MCC is involved: the clock set-up and peripheral set-up are all in the source.
+
+The application runs behind the bootloader: the IPL in page 0 ([dspic_ipl](../dspic_ipl)) and, once it exists, the SPL in pages 1–3. It is linked from 0x002000 with [app.gld](app.gld), generated from Microchip's script for the device by [tools/gen_app_gld.py](tools/gen_app_gld.py): its entry at 0x002000, then a forwarding table of one `GOTO` per interrupt vector, which the IPL's interrupt table points at. [platform/app_vectors.s](platform/app_vectors.s) keeps the linker's own interrupt table out of the hex and the version-record page free. The configuration words are the IPL's, programmed with it, so the application's hex has none.
+
+To program a chip, use the hex `tools/make_image.py install` makes from the IPL's and the application's hex files (and the SPL's, once there is one), with the settings pages 0x029800–0x02A7FF preserved. Programming the application alone leaves a chip with no reset vector and erased configuration words. For debugging, add the IPL's released hex to the project's Loadables.
 
 The SML codec and protocol definitions are shared with the ESP. They are not copied into this folder: the project includes `common/sml_proto.h`, `common/sml.c` and `common/sml.h`, along with `common/enums.h`, directly from [common](../common). The includes (`../../common/sml.h` and friends) rely on the repository layout, so keep the two folders side by side.
 
@@ -63,8 +67,8 @@ The image tool has Python tests of its own: `python3 -m unittest discover -s tes
 | Folder | Contents |
 | --- | --- |
 | `main.c` | The task list, and the order modules are started and run in |
-| `platform/` | Clock and configuration bits, the pin map, millisecond helpers, UTC and calendar arithmetic |
-| `drivers/` | UART1 (the ESP link), UART2 (GNSS), the tube drivers, I2C1, the PCF8563 RTC, the VEML6040 light sensor, and program flash for the settings |
+| `platform/` | Clock set-up, the pin map, millisecond helpers, UTC and calendar arithmetic, the boot mailbox |
+| `drivers/` | UART1 (the ESP link), UART2 (GNSS), the tube drivers, I2C1, the PCF8563 RTC, the VEML6040 light sensor, program flash for the settings, and what flash holds of the boot stages |
 | `console/` | Console output over the ESP link, the fast text formatter, and the debug mask |
 | `timing/` | PPS capture, the epoch timer and output, the control loop and its console report, and the cooperative scheduler that runs the task list |
 | `sync/` | Time source evaluation and selection, holdover, and the UTC second of each epoch |
@@ -363,12 +367,21 @@ The rest of the last page is reserved too, empty, so no application code lands i
 
 Erasing a page stops the CPU for roughly 20–30ms, with interrupts held off throughout; writing a double word takes some 50µs. The timers, captures and epoch output carry on in hardware, but the 1ms slot interrupt is missed, so `epoch_timer_resume()` brings the slots and milliseconds back to where T2/T3 stands afterwards. UART bytes arriving while the FIFOs are full would be lost, so the store writes only at 700–900ms into the second: after the GNSS burst and the ESP's per-second messages, well before the next epoch, with the I2C bus idle and the RTC source not timing a read or a release. At most one record is written each second. The erase and write times are measured on the capture timebase and shown by `pic stored`; the scheduler report counts the slots made up.
 
+# Bootloader
+
+The IPL leaves a mailbox in the top 16 bytes of RAM below 0x8000 (0x7FF0–0x7FFF), which no C start-up touches ([platform/boot.c](platform/boot.c), [common/boot_layout.h](../common/boot_layout.h)). It holds why the PIC reset: the IPL clears RCON's cause bits and keeps them there, so `last reset` and STAT-SYS `reset_cause` come from the mailbox. Started without the IPL, from a debugger say, the mailbox's magic is wrong and RCON is used as before. The mailbox also says how this start came about (the SPL, or the IPL directly with no SPL or a failed one), and counts hand-overs for the boot-loop guard: the application zeroes that count once it has run for 60 s.
+
+`ENTER_BOOTLOADER` leaves a request in the mailbox and resets once its ACK is out, and the SPL starts held. It is refused (`STATE`) without the IPL's mailbox or an intact SPL to stay in, and (`BUSY`) while a save is pending.
+
+`pic -v` shows the boot stages ([drivers/boot_image.c](drivers/boot_image.c)): the IPL's version, the SPL's record (committed, intact, confirmed or rejected), the application's record, and how this start came about. The SPL's CRC-32 is checked through the IPL's service at 0x000200.
+
+Every interrupt reaches its handler through the forwarding table, a `GOTO` of 4 cycles, so the PPS watch's latency is 37 ticks rather than V2's 33.
+
 # Not yet ported
 
 The V2 firmware did rather more than this. Still to come:
 
 - GNSS provisioning;
-- the watchdog;
-- bootloader entry.
+- the watchdog.
 
 The SML messages for most of these are already defined.

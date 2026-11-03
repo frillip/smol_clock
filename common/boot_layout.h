@@ -103,7 +103,7 @@
 #define SPL_CONFIRM_1          0x3CC3
 #define SPL_REJECT_VALUE       0x0000
 
-// IPL info block, in the same word layout.
+// IPL info block, in the same word layout: word 1 RECORD_FORMAT_1, word 5 0.
 #define IPL_INFO_MAGIC_VALUE 0x4950 // "IP"
 #define IPL_INFO_VERSION     2      // 2-3: major << 16 | minor << 8 | patch
 #define IPL_INFO_SERVICES    4      // IPL_SERVICES_VERSION
@@ -125,6 +125,7 @@
 #define MAILBOX_ATTEMPTS      4
 #define MAILBOX_BOOT          5
 #define MAILBOX_TRIALS        6
+#define MAILBOX_RESET_CAUSE   7 // RCON's cause bits as the IPL found them, before clearing them
 
 #define MAILBOX_MAGIC_VALUE   0x4D42
 #define MAILBOX_REQUEST_STAY  0xB007 // ENTER_BOOTLOADER: the SPL stays (HELD)
@@ -145,6 +146,14 @@
 #define BOOT_WINDOW_MS   1000 // the SPL's boot window
 #define BOOT_WATCHDOG_MS 4096 // PR128, PS1024 on the 32 kHz LPRC; 3905 ms measured
 
+/* RCON's reset-cause bits (TRAPR IOPUWR CM EXTR SWR WDTO BOR POR, as
+ * SML_RESET_*). The IPL takes them into MAILBOX_RESET_CAUSE and clears them,
+ * so the next reset's are its own: a power-on's POR must not linger into a
+ * later watchdog reset, or the mailbox would be cleared again. The SPL and
+ * the application read the cause from the mailbox. */
+#define BOOT_RESET_CAUSES 0xC2D3
+#define BOOT_RESET_POWER  0x0003 // POR, BOR: the mailbox starts again
+
 #ifndef __ASSEMBLER__
 
 #include <stdint.h>
@@ -159,14 +168,15 @@ typedef struct
     uint16_t attempts;
     uint16_t boot;
     uint16_t trials;
-    uint16_t reserved;
+    uint16_t reset_cause;
 } BootMailbox;
 
-/* The IPL's CRC-32 service, at IPL_SERVICES (a GOTO to it). Each stage's
- * linker script defines the symbol there (_ipl_crc32_flash = 0x000200).
- * Continues crc over instructions words of flash from address, 3 bytes
- * each, least significant first. Start with BOOT_CRC32_INIT; complement
- * the result. Uses W0-W7; restores TBLPAG. */
+/* The IPL's CRC-32 service, at IPL_SERVICES (a GOTO to it). The SPL's and
+ * the application's linker scripts define the symbol there
+ * (_ipl_crc32_flash = 0x000200). Continues crc over instructions words of
+ * flash from address, 3 bytes each, least significant first. Start with
+ * BOOT_CRC32_INIT; complement the result. The XC16 calling convention;
+ * TBLPAG is restored. Not reentrant with an interrupt that changes TBLPAG. */
 uint32_t ipl_crc32_flash(uint32_t crc, uint32_t address, uint32_t instructions);
 
 #endif // __ASSEMBLER__

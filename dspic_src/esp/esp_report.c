@@ -4,12 +4,14 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "../drivers/boot_image.h"
 #include "../drivers/i2c1.h"
 #include "../drivers/pcf8563.h"
 #include "../drivers/tubes.h"
 #include "../drivers/veml6040.h"
 #include "../gnss/gnss.h"
 #include "../menu/menu.h"
+#include "../platform/boot.h"
 #include "../platform/system.h"
 #include "../platform/time_ms.h"
 #include "../platform/version.h"
@@ -689,6 +691,84 @@ void esp_report_stat_sys(uint32_t epoch_sequence, SML_STAT_SYS_PAYLOAD *payload)
 }
 
 
+static void print_version(uint32_t version)
+{
+    printf("%u.%u.%u", (unsigned)(version >> 16 & 0xFFUL), (unsigned)(version >> 8 & 0xFFUL),
+           (unsigned)(version & 0xFFUL));
+}
+
+
+// The boot stages: the IPL, the SPL, this application's record, and how
+// this start came about.
+static void print_boot(void)
+{
+    static const char *const paths[] = {"the IPL directly", "an unconfirmed SPL", "no SPL",
+                                        "the SPL given up", "the SPL as a last resort"};
+    BootIpl ipl;
+    BootSpl spl;
+    BootApp app;
+    uint8_t path = boot_path();
+    uint8_t bit;
+
+    boot_image_ipl(&ipl);
+    boot_image_spl(&spl, true);
+    boot_image_app(&app);
+    printf("Boot: IPL ");
+    if (ipl.present)
+    {
+        print_version(ipl.version);
+    }
+    else
+    {
+        printf("NONE");
+    }
+    printf(", SPL ");
+    if ((spl.state & SML_SPL_STATE_RECORD) == 0U)
+    {
+        printf("NONE");
+    }
+    else
+    {
+        print_version(spl.version);
+        printf(" %s%s%s%s",
+               (spl.state & SML_SPL_STATE_COMMITTED) != 0U ? "committed" : "UNCOMMITTED",
+               (spl.state & SML_SPL_STATE_INTACT) != 0U ? ", intact" : ", NOT INTACT",
+               (spl.state & SML_SPL_STATE_CONFIRMED) != 0U ? ", confirmed" : "",
+               (spl.state & SML_SPL_STATE_REJECTED) != 0U ? ", REJECTED" : "");
+    }
+    printf(", application record ");
+    if (app.committed)
+    {
+        print_version(app.version);
+        printf(", %lu instructions", (unsigned long)app.length);
+    }
+    else
+    {
+        printf("NONE");
+    }
+    printf("\n");
+    if (!boot_mailbox_valid())
+    {
+        printf("Boot: started without the IPL (no mailbox)\n");
+        return;
+    }
+    printf("Boot: started by ");
+    if (path == 0U)
+    {
+        printf("by the SPL");
+    }
+    for (bit = 0; bit < sizeof(paths) / sizeof(paths[0]); bit++)
+    {
+        if ((path & (1U << bit)) != 0U)
+        {
+            printf("%s%s", (path & ((1U << bit) - 1U)) != 0U ? ", " : "", paths[bit]);
+        }
+    }
+    printf("; trials %u, attempts %u, healthy %u s\n", boot_trials(), boot_attempts(),
+           boot_healthy_s());
+}
+
+
 void esp_report_print_system(bool verbose)
 {
     uint16_t cause = system_reset_cause();
@@ -701,6 +781,10 @@ void esp_report_print_system(bool verbose)
         printf(" (RCON 0x%04X)", cause);
     }
     printf("\n");
+    if (verbose)
+    {
+        print_boot();
+    }
 }
 
 

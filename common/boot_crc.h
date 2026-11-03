@@ -3,9 +3,10 @@
  * and the record CRC.
  * The same CRC-32 as the IPL's flash routine, as zlib's crc32() and Python's
  * zlib.crc32(): IEEE 802.3, reflected, polynomial 0xEDB88320, initial value
- * 0xFFFFFFFF, final complement. 
- * For the application, the SPL, the ESP and the host tools, the IPL has its own in assembly.
- */ 
+ * 0xFFFFFFFF, final complement.
+ * For the application, the SPL, the ESP and the host tools. The IPL has its
+ * own, reading flash: ipl_crc32_flash().
+ */
 #ifndef BOOT_CRC_H
 #define BOOT_CRC_H
 

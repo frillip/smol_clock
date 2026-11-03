@@ -27,6 +27,7 @@
 #include "esp/esp_report.h"
 #include "gnss/gnss.h"
 #include "menu/menu.h"
+#include "platform/boot.h"
 #include "platform/system.h"
 #include "settings/settings.h"
 #include "sync/source_ntp.h"
@@ -247,6 +248,7 @@ static void run_epoch(const TimingSnapshot *snapshot)
     SyncUpdate update;
     uint32_t bound_ns;
 
+    boot_service(scheduler_epoch()); // healthy running: the boot-loop guard's count zeroed
     source_rtc_set_oscillator(kalman_phase_q16(&epoch_control_state()->pps_kf));
     update = sync_update(snapshot, epoch_timer_ms());
     sound_epoch();

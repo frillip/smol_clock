@@ -8,6 +8,8 @@
 #include "../console/debug.h"
 #include "../drivers/pcf8563.h"
 #include "../drivers/uart1.h"
+#include "../drivers/boot_image.h"
+#include "../platform/boot.h"
 #include "../platform/system.h"
 #include "../platform/time_ms.h"
 #include "../settings/settings.h"
@@ -358,6 +360,26 @@ static uint8_t set_rtc(uint32_t utc_seconds)
 
 // Applies a command. Returns the error code, SML_ERROR_NONE for an ACK (or,
 // with accepted set, for ACCEPTED: the final answer comes later).
+/* ENTER_BOOTLOADER: a request for the SPL in the mailbox, then a reset once
+ * the ACK is out; the SPL starts HELD. Refused while a save is pending
+ * (BUSY), and when there is no SPL to stay in (STATE): the IPL would only
+ * start the application again. */
+static uint8_t enter_bootloader(bool *reset)
+{
+    if (settings_save_pending())
+    {
+        return SML_ERROR_BUSY;
+    }
+    if (!boot_mailbox_valid() || !boot_image_spl_usable())
+    {
+        return SML_ERROR_STATE;
+    }
+    boot_request_spl();
+    *reset = true;
+    return SML_ERROR_NONE;
+}
+
+
 static uint8_t run_command(const SML_CMD_USER_PAYLOAD *command, uint32_t now_ms, bool *reset,
                            bool *accepted)
 {
@@ -398,7 +420,8 @@ static uint8_t run_command(const SML_CMD_USER_PAYLOAD *command, uint32_t now_ms,
         case SML_USER_SET_DEBUG: return change_debug(argument);
         case SML_USER_RESYNC: sync_resync(); return SML_ERROR_NONE;
         case SML_USER_RESET: *reset = true; return SML_ERROR_NONE;
-        default: return SML_ERROR_UNSUPPORTED; // ENTER_BOOTLOADER: not yet
+        case SML_USER_ENTER_BOOTLOADER: return enter_bootloader(reset);
+        default: return SML_ERROR_UNSUPPORTED;
     }
 }
 
