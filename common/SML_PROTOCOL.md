@@ -6,7 +6,7 @@ SML is the link between the dsPIC33EP256GP504 timekeeper (the **PIC**) and the E
 
 The PIC keeps UTC and disciplines the clock's epoch. The ESP supplies what the PIC cannot get on its own: network time, timezone schedules, leap-second data and user commands. In return the ESP receives the PIC's state for display, logging and statistics, and tells the PIC about its network and services.
 
-This document describes protocol version 2.5 (`SML_PROTOCOL_MAJOR` 2, `SML_PROTOCOL_MINOR` 5) with settings schema 1 (`SML_SETTINGS_SCHEMA`). The definitions live in [sml_proto.h](sml_proto.h), and the reference codec in [sml.c](sml.c) and [sml.h](sml.h), all in `common/` and shared by both firmwares. TIME-AUTH is stable. Every other payload remains provisional until both ends implement it.
+This document describes protocol version 2.6 (`SML_PROTOCOL_MAJOR` 2, `SML_PROTOCOL_MINOR` 6) with settings schema 1 (`SML_SETTINGS_SCHEMA`). The definitions live in [sml_proto.h](sml_proto.h), and the reference codec in [sml.c](sml.c) and [sml.h](sml.h), all in `common/` and shared by both firmwares. TIME-AUTH is stable. Every other payload remains provisional until both ends implement it.
 
 # Physical link
 
@@ -639,12 +639,12 @@ STAT-SYS is the PIC's counterpart to the uptime and version in STAT-NET: what th
 
 | Offset | Field | Type | Unit / values |
 | --- | --- | --- | --- |
-| 0 | flags | u16 | Reserved, zero |
+| 0 | flags | u16 | Bit 0 `FAULT`: the last reset was a fault the PIC recorded, `fault` says which. Others zero |
 | 2 | reset_cause | u16 | `SML_RESET_*` bits as found at start-up, see [Reset causes](#reset-causes). More than one may be set |
 | 4 | uptime_s | u32 | Seconds since start-up, counted in epochs; it starts under a second after reset. A drop means the PIC restarted |
 | 8 | pic_version | u32 | PIC firmware: major << 16 \| minor << 8 \| patch, as `esp_version` |
 | 12 | loop_max_ms | u16 | The longest pass of the PIC's main loop since the previous STAT-SYS (normally the last second), ms: anything that held the rest up |
-| 14 | reserved | u16 | Zero |
+| 14 | fault | u16 | With `FAULT`: kind << 8 \| trap. Kind 1 `WATCHDOG` (the main loop or the epoch stopped), 2 `TRAP`. Trap, in the order of the vectors: 1 `OSCILLATOR`, 2 `ADDRESS`, 3 `HARD`, 4 `STACK`, 5 `MATH`, 6 `DMA`, 7 `SOFT`. Zero otherwise |
 
 The PIC sends STAT-SYS every epoch in SML mode, last of the epoch's messages, so the uptime the ESP shows keeps up and a restart is heard about straight away; and on `REQUEST_MESSAGE`. The ESP shows the version, uptime and reset cause in its status, and prints a line when the uptime drops.
 
@@ -1200,6 +1200,7 @@ The timezone architecture document should follow the model described under [TZ-S
 
 | Date | Change |
 | --- | --- |
+| 2026-11-03 (2.6) | STAT-SYS flag bit 0 `FAULT` and `fault` (was reserved): a watchdog reset or a trap, as the V2+ PIC records them. No layout change |
 | 2026-11-02 (2.5) | BOOT class (0xF0) defined: BOOT-STATUS (0x01, new), BOOT-COMMAND, BOOT-RESPONSE, BOOT-DATA, BOOT-DATA-RESPONSE, BOOT-VERIFY, BOOT-VERIFY-RESPONSE, with their regions, commands, keys, modes and flags. `SML_ERROR_CRC` (10) and `SML_ERROR_NOT_BLANK` (11). A layout field of any size but 2 or 4 is a byte string. Not implemented yet. No existing layout changes |
 | 2026-10-30 (2.4) | `RESYNC` defined and implemented on the V2+ PIC: every source judged again and chosen again, holdover dropped. `SML_CAUSE_RESYNC` (9). No layout change |
 | 2026-10-29 | Document only, no wire change. The V2+ PIC sends TIME-RTC every epoch after TIME-GNSS, with its fields defined for the PCF8563; the RTC's bound grows from its last measurement against the synchronised clock, kept over a reset, so the TIME-AUTH uncertainty while free running on the RTC and the STAT-SOURCES bound for it are no longer a fixed ±999ms |

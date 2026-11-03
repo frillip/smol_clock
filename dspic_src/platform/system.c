@@ -2,6 +2,7 @@
 
 #include "../../common/boot_layout.h"
 #include "boot.h"
+#include "fault.h"
 
 // The configuration words are the IPL's (dspic_ipl/ipl_config.c),
 // programmed once with it: an application image carries none. Programmed
@@ -22,6 +23,7 @@ void system_init(void)
     // The IPL has cleared them already and left the cause in the mailbox.
     RCON = (uint16_t)(RCON & ~BOOT_RESET_CAUSES);
     reset_cause = boot_init(rcon);
+    fault_init(reset_cause);
     board_init();
     clock_init();
     // Interrupt priorities are set by the module that owns each interrupt:
@@ -93,6 +95,7 @@ uint16_t system_reset_cause(void)
 
 void system_reset(void)
 {
+    fault_reset_planned();
     __asm__ volatile("reset");
     while (1)
         ;

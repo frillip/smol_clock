@@ -8,6 +8,8 @@
 #include <Arduino.h>
 #include <stdint.h>
 
+#include "sml/sml_proto.h"
+
 const char *pic_report_command_name(uint16_t command);
 const char *pic_report_result_name(uint16_t result);
 const char *pic_report_error_name(uint16_t error);
@@ -18,6 +20,10 @@ const char *pic_report_tz_source_name(uint8_t source);
 const char *pic_report_boot_mode_name(uint8_t mode);
 // The most telling of the SML_RESET_* bits, as text.
 const char *pic_report_reset_name(uint16_t cause);
+// The PIC's last reset from STAT-SYS: the fault it recorded if any
+// ("watchdog", "ADDRESS trap"), else pic_report_reset_name(). text is
+// returned.
+const char *pic_report_last_reset(const SML_STAT_SYS_PAYLOAD *sys, char *text, size_t size);
 // "0.1.0" from major << 16 | minor << 8 | patch.
 void pic_report_version(char *text, size_t size, uint32_t version);
 

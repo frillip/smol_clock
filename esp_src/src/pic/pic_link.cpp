@@ -412,6 +412,7 @@ static void note_system(const SML_STAT_SYS_PAYLOAD *sys)
     static bool seen;
     static uint32_t last_uptime_s;
     char version[16];
+    char reset[48];
 
     if (in_spl)
     {
@@ -428,16 +429,20 @@ static void note_system(const SML_STAT_SYS_PAYLOAD *sys)
         }
         console_printf("%s: firmware %s, up %lu s, last reset: %s\n",
                        seen ? "PIC restarted" : "PIC", version, (unsigned long)sys->uptime_s,
-                       pic_report_reset_name(sys->reset_cause));
+                       pic_report_last_reset(sys, reset, sizeof(reset)));
     }
     seen = true;
     last_uptime_s = sys->uptime_s;
 }
 
-// BOOT-STATUS from the SPL: the link goes quiet, until STAT-SYS.
+// BOOT-STATUS from the SPL: the link goes quiet, until STAT-SYS. Not for
+// the boot window after a reset: the SPL hands over by itself within the
+// second and writes nothing meanwhile, and the new application's link waits
+// for a frame before it says anything (an update in progress holds the SPL
+// itself, from pic_update.c).
 static void note_boot_status(const SML_BOOT_STATUS_PAYLOAD *status)
 {
-    if (status->mode == SML_BOOT_MODE_APP || in_spl)
+    if (status->mode == SML_BOOT_MODE_APP || status->mode == SML_BOOT_MODE_WINDOW || in_spl)
     {
         return;
     }

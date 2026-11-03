@@ -12,6 +12,7 @@
 #include "../gnss/gnss.h"
 #include "../menu/menu.h"
 #include "../platform/boot.h"
+#include "../platform/fault.h"
 #include "../platform/system.h"
 #include "../platform/time_ms.h"
 #include "../platform/version.h"
@@ -688,6 +689,11 @@ void esp_report_stat_sys(uint32_t epoch_sequence, SML_STAT_SYS_PAYLOAD *payload)
     payload->uptime_s = epoch_sequence;
     payload->pic_version = PIC_VERSION_NUMBER;
     payload->loop_max_ms = scheduler_take_longest_pass_ms();
+    if (fault_last()->kind != FAULT_NONE)
+    {
+        payload->flags = SML_SYS_FAULT;
+        payload->fault = (uint16_t)((uint16_t)fault_last()->kind << 8 | fault_last()->trap);
+    }
 }
 
 
@@ -781,6 +787,7 @@ void esp_report_print_system(bool verbose)
         printf(" (RCON 0x%04X)", cause);
     }
     printf("\n");
+    fault_print();
     if (verbose)
     {
         print_boot();

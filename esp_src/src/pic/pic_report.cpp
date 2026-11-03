@@ -128,6 +128,28 @@ const char *pic_report_reset_name(uint16_t cause)
     return "unknown";
 }
 
+const char *pic_report_last_reset(const SML_STAT_SYS_PAYLOAD *sys, char *text, size_t size)
+{
+    static const char *const traps[] = {"?",     "OSCILLATOR", "ADDRESS", "HARD",
+                                        "STACK", "MATH",       "DMA",     "SOFT"};
+    uint8_t kind = (uint8_t)(sys->fault >> 8);
+    uint8_t trap = (uint8_t)(sys->fault & 0xFFU);
+
+    if ((sys->flags & SML_SYS_FAULT) != 0U && kind == SML_FAULT_TRAP)
+    {
+        snprintf(text, size, "%s trap", trap < 8U ? traps[trap] : "?");
+    }
+    else if ((sys->flags & SML_SYS_FAULT) != 0U && kind == SML_FAULT_WATCHDOG)
+    {
+        snprintf(text, size, "watchdog");
+    }
+    else
+    {
+        snprintf(text, size, "%s", pic_report_reset_name(sys->reset_cause));
+    }
+    return text;
+}
+
 void pic_report_version(char *text, size_t size, uint32_t version)
 {
     snprintf(text, size, "%lu.%lu.%lu", (unsigned long)(version >> 16),
@@ -210,6 +232,7 @@ static void print_system(Stream *output, bool verbose)
 {
     SML_STAT_SYS_PAYLOAD sys;
     char version[16];
+    char reset[48];
 
     if (!pic_link_get(SML_CLASS_STAT, SML_STAT_SYS, &sys, 30000U))
     {
@@ -224,7 +247,7 @@ static void print_system(Stream *output, bool verbose)
     {
         output->printf("PIC:      %s, up ", version);
         time_print_duration(output, sys.uptime_s);
-        output->printf(", last reset: %s\n", pic_report_reset_name(sys.reset_cause));
+        output->printf(", last reset: %s\n", pic_report_last_reset(&sys, reset, sizeof(reset)));
         return;
     }
     output->printf("\n=== PIC system ===\n");
@@ -232,7 +255,7 @@ static void print_system(Stream *output, bool verbose)
     output->printf("Up:       ");
     time_print_duration(output, sys.uptime_s);
     output->printf(", %lu restarts seen\n", (unsigned long)pic_link_stats()->restarts);
-    output->printf("Reset:    %s (0x%04X)\n", pic_report_reset_name(sys.reset_cause),
+    output->printf("Reset:    %s (0x%04X)\n", pic_report_last_reset(&sys, reset, sizeof(reset)),
                    sys.reset_cause);
     output->printf("Loop:     longest pass %u ms in the last second\n", sys.loop_max_ms);
 }

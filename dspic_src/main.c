@@ -28,6 +28,7 @@
 #include "gnss/gnss.h"
 #include "menu/menu.h"
 #include "platform/boot.h"
+#include "platform/fault.h"
 #include "platform/system.h"
 #include "settings/settings.h"
 #include "sync/source_ntp.h"
@@ -248,6 +249,8 @@ static void run_epoch(const TimingSnapshot *snapshot)
     SyncUpdate update;
     uint32_t bound_ns;
 
+    // The watchdog fed: the epoch timer and the main loop are both going.
+    fault_epoch(scheduler_epoch());
     boot_service(scheduler_epoch()); // healthy running: the boot-loop guard's count zeroed
     source_rtc_set_oscillator(kalman_phase_q16(&epoch_control_state()->pps_kf));
     update = sync_update(snapshot, epoch_timer_ms());
@@ -336,7 +339,7 @@ int main(void)
     console_init(FCY);
     esp_link_init();
     printf("\033[2J\033[1;1H");
-    esp_report_print_system(false); // the version and why the PIC (re)started
+    esp_report_print_system(false); // the version and why the PIC (re)started, and a fault
 
     debug_init();
     sync_init();
@@ -373,7 +376,10 @@ int main(void)
     // Now the saved debug mask is in force.
     timing_report_sync(&capture_sync, debug_enabled(DEBUG_TIMING));
     settings_print_start(debug_enabled(DEBUG_EVENTS));
+    scheduler_set_task_hook(fault_task);
     scheduler_init();
+    // From here the watchdog is fed every epoch (run_epoch()).
+    watchdog_start();
 
     while (1)
     {

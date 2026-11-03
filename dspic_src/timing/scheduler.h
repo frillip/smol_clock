@@ -92,6 +92,12 @@ typedef struct SchedulerTask
 // Starts from the epoch timer's current time.
 void scheduler_init(void);
 
+// Told the name of each task as it starts, and "loop" when it ends (the
+// main loop's own work in between): platform/fault.h keeps it, so a
+// watchdog reset can say what was running.
+typedef void (*SchedulerTaskHook)(const char *name);
+void scheduler_set_task_hook(SchedulerTaskHook hook);
+
 // Once at the top of every pass of the main loop: reads the time once, so
 // every task in the pass sees the same moment.
 void scheduler_pass(void);

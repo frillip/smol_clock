@@ -67,7 +67,7 @@ The image tool has Python tests of its own: `python3 -m unittest discover -s tes
 | Folder | Contents |
 | --- | --- |
 | `main.c` | The task list, and the order modules are started and run in |
-| `platform/` | Clock set-up, the pin map, millisecond helpers, UTC and calendar arithmetic, the boot mailbox |
+| `platform/` | Clock set-up, the pin map, millisecond helpers, UTC and calendar arithmetic, the boot mailbox, the watchdog, the trap handlers and the fault record |
 | `drivers/` | UART1 (the ESP link), UART2 (GNSS), the tube drivers, I2C1, the PCF8563 RTC, the VEML6040 light sensor, program flash for the settings, and what flash holds of the boot stages |
 | `console/` | Console output over the ESP link, the fast text formatter, and the debug mask |
 | `timing/` | PPS capture, the epoch timer and output, the control loop and its console report, and the cooperative scheduler that runs the task list |
@@ -379,11 +379,33 @@ Every interrupt reaches its handler through the forwarding table, a `GOTO` of 4 
 
 The SPL ([dspic_spl](../dspic_spl/README.md)) can be driven from a PC before the ESP's side exists: [tools/pic_boot.py](../tools/pic_boot.py) installs an application file (`make_image.py app`) over any serial port wired to UART1, the ESP's UART bridge for instance, as the ESP will.
 
+# Watchdog and faults
+
+The watchdog runs at the IPL's period: PR128, PS1024 on the 32 kHz LPRC, 4.1 s nominal, 3.9 s measured ([platform/fault.c](platform/fault.c)). It starts at the end of start-up and is fed once a second by the epoch's work (`run_epoch()` in [main.c](main.c)), which runs from the main loop when the epoch timer's measurement slot comes round. So it is fed only while both are going: a main loop stuck anywhere, an interrupt that never lets it run, or an epoch timer that has stopped, each resets the PIC within 4 s, and the clock starts again with its RTC, saved settings and time zone schedule. Nothing else feeds it. Work that holds the main loop for seconds with good reason would call `watchdog_extend()` as it goes; nothing does so yet. A debug build (`__DEBUG`) leaves it off, so a breakpoint does not reset the PIC.
+
+The trap handlers ([platform/traps.s](platform/traps.s)) take the trap and its return address and reset. Before, a trap went to the default handler's reset and looked like a reset command.
+
+What happened is kept over the reset in a 32-byte record below the boot mailbox (0x7FD0–0x7FEF, [common/boot_layout.h](../common/boot_layout.h)), which neither the IPL nor the SPL touches: what was running, as the scheduler names its tasks (`10 ms`, `display load`, `epoch`, or `loop` for the main loop's own work between them), the uptime, and for a trap which one and where. At the next start it is read with the reset cause, and a fault is printed after the start-up line and in `pic -v`:
+
+```
+PIC 0.3.8, up 00:00:00, last reset: watchdog
+Fault: watchdog, in 10 ms, up 5321 s
+```
+
+```
+Fault: ADDRESS trap, before 0x01A2B4, in epoch, up 77 s
+```
+
+The address is the trap's return address, the instruction after the one at fault (bit 0 of the stacked word, the SFA flag, left out): look it up in the build's `.map` or listing. A watchdog reset after the application's own reset (`pic reset`, `ENTER_BOOTLOADER`) and before it ran again is put down to the SPL. A power-on or MCLR reset is never a fault, whatever RAM holds.
+
+STAT-SYS (SML 2.6) carries the fault to the ESP, which shows it as the last reset: `last reset: watchdog`, `last reset: ADDRESS trap`.
+
+A PIC that faults again and again within 30 s of each start ends up held in the SPL by its boot-loop guard (8 starts), where `update pic force` on the ESP installs another application.
+
 # Not yet ported
 
 The V2 firmware did rather more than this. Still to come:
 
-- GNSS provisioning;
-- the watchdog.
+- GNSS provisioning.
 
 The SML messages for most of these are already defined.

@@ -305,13 +305,15 @@ static int fetch(ManifestEntry *entry)
 
 // ---- What is due ------------------------------------------------------------
 
-// The ESP's image offered is newer (or, with any_version, different).
+// The ESP's image offered is newer, or, with any_version, offered at all:
+// a forced install takes it whatever its version, the same one included
+// (a rebuild under the same version, or a damaged image to be replaced).
 static bool esp_due(const ManifestEntry *entry, bool any_version)
 {
     int order = 0;
 
     return entry->esp.present && manifest_compare_versions(entry->esp.version, ESP_VERSION, &order) &&
-           (order > 0 || (any_version && order != 0));
+           (order > 0 || any_version);
 }
 
 
@@ -742,8 +744,7 @@ void updater_esp(Stream *output, bool force)
     }
     if (!esp_due(&entry, force))
     {
-        output->printf(force ? "ESP: %s offered, the version it runs\n"
-                             : "ESP: %s offered, up to date (force to install any version)\n",
+        output->printf("ESP: %s offered, up to date (force to install it anyway)\n",
                        entry.esp.version);
         return;
     }

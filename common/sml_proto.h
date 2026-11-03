@@ -68,7 +68,7 @@
 #define SML_TZ_TRANSITION_MAX 8U
 #define SML_SETTINGS_SCHEMA   1U
 #define SML_PROTOCOL_MAJOR    2U
-#define SML_PROTOCOL_MINOR    5U
+#define SML_PROTOCOL_MINOR    6U
 
 #define SML_CLASS_TIME 0x10U
 #define SML_CLASS_TZ   0x20U
@@ -909,15 +909,31 @@ typedef struct
  * second after reset, and a drop means the PIC restarted.
  * pic_version: major << 16 | minor << 8 | patch, as esp_version.
  * loop_max_ms: the longest pass of the PIC's main loop since the previous
- * STAT-SYS (normally the last second): work that held everything else up. */
+ * STAT-SYS (normally the last second): work that held everything else up.
+ * flags SML_SYS_FAULT: the last reset was a fault the PIC recorded, and
+ * fault says which: SML_FAULT_* << 8 | SML_TRAP_* (SML 2.6). */
+#define SML_SYS_FAULT 0x0001U
+
+#define SML_FAULT_WATCHDOG 1U // the watchdog: the main loop or the epoch stopped
+#define SML_FAULT_TRAP     2U // a trap, below
+
+// Traps, in the order of their vectors from 1.
+#define SML_TRAP_OSCILLATOR 1U
+#define SML_TRAP_ADDRESS    2U
+#define SML_TRAP_HARD       3U
+#define SML_TRAP_STACK      4U
+#define SML_TRAP_MATH       5U
+#define SML_TRAP_DMA        6U
+#define SML_TRAP_SOFT       7U
+
 typedef struct
 {
-    uint16_t flags; // reserved; transmit zero
+    uint16_t flags; // SML_SYS_*
     uint16_t reset_cause;
     uint32_t uptime_s;
     uint32_t pic_version;
     uint16_t loop_max_ms;
-    uint16_t reserved;
+    uint16_t fault; // SML_FAULT_* << 8 | SML_TRAP_*, with SML_SYS_FAULT; else zero
 } SML_STAT_SYS_PAYLOAD;
 
 /* Shared settings body. No EEPROM marker/checksum or action/reset flags.

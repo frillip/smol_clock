@@ -35,7 +35,7 @@ void updater_service(bool have_local, uint32_t local_seconds);
 // Reports to output. check: what is offered, for the ESP and the PIC (and
 // stages the PIC's running application if no slot holds it). pull: the next
 // update due, the ESP's (restart later to use it), else the PIC's. esp: the
-// ESP's image if newer (restart later); force: if different, and restart.
+// ESP's image if newer (restart later); force: whatever its version, and restart.
 // pic: the PIC's application if newer; force: whatever its version, from a
 // staged file if the update server cannot be reached. spl: not yet.
 bool updater_check(Stream *output);

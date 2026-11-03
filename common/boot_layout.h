@@ -131,6 +131,13 @@
 #define MAILBOX_REQUEST_STAY  0xB007 // ENTER_BOOTLOADER: the SPL stays (HELD)
 #define MAILBOX_RUNNING_VALUE 0xA99A // the application is running: traps go to it
 
+/* The application's fault record (dspic_src/platform/fault.h): 32 bytes
+ * below the mailbox, kept over the reset a watchdog or a trap causes. The
+ * application's own: the IPL and the SPL never write it (their stacks grow
+ * up from low RAM and stay far below it), and no stage allocates it. */
+#define FAULT_RECORD_ADDRESS 0x7FD0
+#define FAULT_RECORD_BYTES   32
+
 // MAILBOX_BOOT bits: how this start came about (BOOT-STATUS boot,
 // SML_BOOT_PATH_* in sml_proto.h, the same bits).
 #define BOOT_PATH_APP_DIRECT   0x01 // the IPL started the application itself

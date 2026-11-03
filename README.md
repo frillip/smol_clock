@@ -140,7 +140,7 @@ The current console has no login and uses plain Telnet, so anyone with access to
 
 The [ESP updater](esp_src/src/net/updater.cpp) pulls firmware over WiFi from an HTTPS update manifest, `/smol_clock/v2plus/manifest.json` by default. The hostname and path of the manifest are configurable. An optional configuration string selects an update profile, for example `development`, with `default` clearing that selection. The manifest names the ESP's image and the PIC's application for each configuration, each with its version, size and SHA-256 (the [ESP README](esp_src/README.md#updates) has the format).
 
-`update check` checks what is available for both chips without installing anything. `update install` installs the next update due: the ESP's if it is newer, leaving the ESP running until `esp reset` completes the change, otherwise the PIC's application. Each part also has its own command: `update esp` (newer only, finished by `esp reset`), `update esp force` (any other version, and an immediate restart: useful when testing, though somewhat more committed than merely checking), `update pic` and `update pic force`, and `update spl`, which is not supported yet.
+`update check` checks what is available for both chips without installing anything. `update install` installs the next update due: the ESP's if it is newer, leaving the ESP running until `esp reset` completes the change, otherwise the PIC's application. Each part also has its own command: `update esp` (newer only, finished by `esp reset`), `update esp force` (whatever version is offered, the running one included, and an immediate restart: useful when testing, though somewhat more committed than merely checking), `update pic` and `update pic force`, and `update spl`, which is not supported yet.
 
 The PIC's application goes in through its bootloader: the ESP stages the file in its own flash, puts the PIC in its bootloader, writes and reads back the image, and only then commits it. A failed or interrupted update can leave the PIC in its bootloader without an application. After 30 s the ESP installs the staged file again by itself, without the network. The ESP also stages the application the manifest offers, fetched by `update check` when no slot holds it, so `update pic force` can reinstall it offline. `update` lists the staged files and `update erase pic|spl|all` empties them. `pic boot` shows what the bootloader reports, `pic boot run` starts the application, and `pic boot hold` keeps the PIC in its bootloader.
 
@@ -258,7 +258,7 @@ Values are written as people write them: on/off (or 1/0, yes/no), offsets as `+5
 | `update [-v]` | The running version, the staged files (`-v` the SPL's too), the update server and the automatic update setting |
 | `update check` | What is offered for the ESP and the PIC. Also stages the PIC's application offered if no slot holds it |
 | `update install` | The next update due: the ESP's if newer (finished by `esp reset`), else the PIC's |
-| `update esp [force]` | The ESP's image if newer (finished by `esp reset`). `force` installs any other version and restarts |
+| `update esp [force]` | The ESP's image if newer (finished by `esp reset`). `force` installs whatever version is offered and restarts |
 | `update pic [force]` | The PIC's application if newer. `force` any version, from the staged file when the update server cannot be reached |
 | `update spl [force]` | The PIC's SPL: not supported yet |
 | `update erase pic\|spl\|all` | Empty the staged files' slots |

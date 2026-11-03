@@ -1421,7 +1421,7 @@ static const Entry update_entries[] = {
      update_action},
     {"install", VALUE_NONE, NULL, 0, 0, "", "The next due: ESP (esp reset), else PIC", update_action},
     {"esp", VALUE_OPTION, "force", 0, 0, "[force]",
-     "The ESP if newer (esp reset); force: any other, restarts", update_part},
+     "The ESP if newer (esp reset); force: any version, restarts", update_part},
     {"pic", VALUE_OPTION, "force", 0, 0, "[force]",
      "The PIC's application if newer; force: any, or staged", update_part},
     {"spl", VALUE_OPTION, "force", 0, 0, "[force]", "The PIC's SPL (not yet)", update_part},
