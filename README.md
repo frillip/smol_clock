@@ -134,7 +134,7 @@ The same console commands can be issued through the ESP USB-UART connection or o
 
 There are two separate controls: whether Telnet should start on boot, and whether the listener is running now. `telnet on` enables startup and starts the listener when changing from disabled to enabled. `telnet off` disables startup but leaves a running listener alone. `telnet start` and `telnet stop` control the listener without changing the startup preference. Stopping it leaves an existing session open, so exit that session as well if required. Save the startup preference and port with `save`.
 
-The current console has no login and uses plain Telnet, so anyone with access to it can issue the commands. `wifi` never prints the saved WiFi passphrase, but the console can still change every setting. This is a convenience console for a trusted local network, with USB-UART available when Telnet is disabled. Some form of authentication and general hardening is on the long list of things to be added eventually.
+Over Telnet, anything that changes something needs `telnet login <password>` first, once per connection: settings, saves, resets, updates, Wi-Fi and Telnet's own settings. Looking at the clock does not: every status command, `ntp sync`, `wifi scan`, `update check` and `debug` work without it. `help` marks the commands that need it with `*`. The password is set with `telnet passwd <password>`; until then a default stands, and `telnet` says so. Five wrong passwords in a row lock logins for 30 seconds after each further wrong one, for every connection, until a good login or a new password; other commands carry on meanwhile. The USB-UART console needs no login, so a forgotten password is changed there. Telnet is still plaintext: the password crosses the network as typed, so this keeps out the curious on a trusted local network, not a determined attacker. `wifi` never prints the saved WiFi passphrase.
 
 ## OTA firmware updates
 
@@ -257,6 +257,8 @@ Values are written as people write them: on/off (or 1/0, yes/no), offsets as `+5
 | `telnet on\|off` | Start Telnet at start-up (on also starts it now, off leaves a running listener alone) |
 | `telnet start`, `telnet stop` | Start or stop the listener now, without changing the start-up setting |
 | `telnet port <n>` | The port, 1–65535 |
+| `telnet login <password>` | Log this Telnet connection in, so it can change things |
+| `telnet passwd <password>` | Set the Telnet password, 4–64 characters (stored hashed) |
 | `update [-v]` | The running version, the staged files (`-v` the SPL's too), the update server and the automatic update setting |
 | `update check` | What is offered for the ESP and the PIC. Also stages the PIC's application and SPL offered if no slot holds them |
 | `update install` | `update check`, then everything due in one go: the ESP's (restarting at once), then the PIC's SPL, then its application, from the staged files |

@@ -7,6 +7,7 @@
 #include <strings.h>
 
 #include "../net/telnet.h"
+#include "../net/telnet_auth.h"
 #include "../net/updater.h"
 #include "../net/wifi_link.h"
 #include "../pic/pic_boot.h"
@@ -1280,6 +1281,68 @@ static void telnet_action(Stream *output, const Entry *entry, const Value *value
     }
 }
 
+static void telnet_login(Stream *output, const Entry *entry, const Value *value)
+{
+    uint32_t detail = 0;
+
+    (void)entry;
+    if (!value->given)
+    {
+        output->printf("telnet login: <password>\n");
+        return;
+    }
+    if (output != telnet_client())
+    {
+        output->printf("telnet login: for telnet connections (this console needs none)\n");
+        return;
+    }
+    switch (telnet_auth_login(value->text, millis(), &detail))
+    {
+        case TELNET_LOGIN_OK:
+            telnet_set_authorised(true);
+            output->printf("telnet: logged in%s\n",
+                           telnet_auth_is_default() ? "; the password is the default, change it "
+                                                      "with telnet passwd"
+                                                    : "");
+            break;
+        case TELNET_LOGIN_WRONG:
+            if (detail == 0)
+            {
+                output->printf("telnet: wrong password; logins locked for %u s\n",
+                               TELNET_LOCKOUT_MS / 1000U);
+            }
+            else
+            {
+                output->printf("telnet: wrong password (%lu tries before a lockout)\n",
+                               (unsigned long)detail);
+            }
+            break;
+        case TELNET_LOGIN_LOCKED:
+            output->printf("telnet: logins locked for another %lu s\n", (unsigned long)detail);
+            break;
+    }
+}
+
+
+static void telnet_passwd(Stream *output, const Entry *entry, const Value *value)
+{
+    (void)entry;
+    if (!value->given)
+    {
+        output->printf("telnet passwd: <password>, %u to %u characters\n", TELNET_PASSWORD_MIN,
+                       TELNET_PASSWORD_MAX);
+        return;
+    }
+    if (!telnet_auth_set(value->text))
+    {
+        output->printf("telnet passwd: %u to %u characters\n", TELNET_PASSWORD_MIN,
+                       TELNET_PASSWORD_MAX);
+        return;
+    }
+    output->printf("telnet: password changed\n");
+}
+
+
 static void telnet_port(Stream *output, const Entry *entry, const Value *value)
 {
     (void)entry;
@@ -1296,6 +1359,8 @@ static const Entry telnet_entries[] = {
     {"start", VALUE_NONE, NULL, 0, 0, "", "Start now, this time only", telnet_action},
     {"stop", VALUE_NONE, NULL, 0, 0, "", "Stop now; this session stays open", telnet_action},
     {"port", VALUE_NUMBER, NULL, 1, 65535, "<n>", "Port (restarts the listener)", telnet_port},
+    {"login", VALUE_TEXT, NULL, 0, 0, "<password>", "Log this connection in", telnet_login},
+    {"passwd", VALUE_TEXT, NULL, 0, 0, "<password>", "Set the password", telnet_passwd},
 };
 
 static void print_update_auto(Stream *output)
@@ -1528,13 +1593,71 @@ static const Noun *find_noun(const char *name)
     return NULL;
 }
 
+// ---- Telnet login -----------------------------------------------------------------
+
+// What a telnet connection may do before "telnet login": look at anything,
+// and the few actions that change nothing (polls, scans, the update check,
+// the PIC's debug output). Everything else changes something, and new
+// commands are protected unless added here.
+static bool needs_login(const Noun *noun, const Entry *entry, const Value *value)
+{
+    static const char *const open_nouns[] = {"status", "help", "verbose", "debug"};
+    static const char *const open_actions[][2] = {
+        {"pic", "stored"}, {"pic", "boot"},     {"ntp", "tracking"},  {"ntp", "sync"},
+        {"wifi", "scan"},  {"update", "check"}, {"telnet", "login"},
+    };
+    size_t index;
+
+    for (index = 0; index < sizeof(open_nouns) / sizeof(open_nouns[0]); index++)
+    {
+        if (strcmp(noun->name, open_nouns[index]) == 0)
+        {
+            return false;
+        }
+    }
+    if (entry == NULL)
+    {
+        // The noun alone shows it, but for these.
+        return strcmp(noun->name, "save") == 0 || strcmp(noun->name, "defaults") == 0 ||
+               strcmp(noun->name, "reset") == 0;
+    }
+    if (!value->given && entry->kind != VALUE_NONE && entry->kind != VALUE_OPTION)
+    {
+        return false; // a setting, shown
+    }
+    for (index = 0; index < sizeof(open_actions) / sizeof(open_actions[0]); index++)
+    {
+        if (entry->word != NULL && strcmp(noun->name, open_actions[index][0]) == 0 &&
+            strcmp(entry->word, open_actions[index][1]) == 0)
+        {
+            return entry->kind == VALUE_OPTION && value->given; // "pic boot run|hold"
+        }
+    }
+    return true;
+}
+
+
+// For help: whether the entry, used, needs a login on telnet.
+static bool entry_needs_login(const Noun *noun, const Entry *entry)
+{
+    Value used;
+
+    memset(&used, 0, sizeof(used));
+    used.given = entry->kind != VALUE_NONE;
+    return needs_login(noun, entry, &used);
+}
+
+
+static const char *const LOGIN_FIRST = "telnet: log in first (telnet login <password>)\n";
+
 static void print_entry(Stream *output, const Noun *noun, const Entry *entry)
 {
     char usage[64];
 
     snprintf(usage, sizeof(usage), "%s%s%s%s%s", noun->name, entry->word != NULL ? " " : "",
              entry_name(entry), entry->usage[0] != '\0' ? " " : "", entry->usage);
-    output->printf("  %-36s %s\n", usage, entry->help);
+    output->printf("%c %-36s %s\n", entry_needs_login(noun, entry) ? '*' : ' ', usage,
+                   entry->help);
 }
 
 static void print_help(Stream *output, const char *name)
@@ -1565,9 +1688,11 @@ static void print_help(Stream *output, const char *name)
     }
     for (index = 0; index < NOUN_COUNT; index++)
     {
-        output->printf("  %-12s %s\n", nouns[index].name, nouns[index].help);
+        output->printf("%c %-12s %s\n", needs_login(&nouns[index], NULL, NULL) ? '*' : ' ',
+                       nouns[index].name, nouns[index].help);
     }
     output->printf("<command> shows it (-v: everything); help <command> for what it takes.\n"
+                   "* changes something: on telnet, only after telnet login.\n"
                    "Settings change at once, and are kept once saved (save).\n"
                    "Times: offsets +5:30, times of day 07:30, intervals 1024, 17m, 1h, 1d;\n"
                    "moments 2026-10-27T15:00Z, 2026-10-27 16:00+01:00 or Unix seconds.\n");
@@ -1746,6 +1871,11 @@ void commands_execute(Stream *output, char *line)
     }
     if (*rest == '\0' || is_verbose_flag(rest))
     {
+        if (output == telnet_client() && !telnet_authorised() && needs_login(noun, NULL, NULL))
+        {
+            output->printf("%s", LOGIN_FIRST);
+            return;
+        }
         noun->bare(output, verbose || *rest != '\0');
         return;
     }
@@ -1783,6 +1913,11 @@ void commands_execute(Stream *output, char *line)
         return;
     }
     value.verbose = verbose;
+    if (output == telnet_client() && !telnet_authorised() && needs_login(noun, entry, &value))
+    {
+        output->printf("%s", LOGIN_FIRST);
+        return;
+    }
     entry->handler(output, entry, &value);
 }
 

@@ -18,24 +18,16 @@ The console and PIC link baud rates are set in [src/board.h](src/board.h). The P
 
 ## Shared sources
 
-The ESP compiles the same SML codec and protocol definitions as the dsPIC, so the two ends cannot quietly disagree about where a field is. Rather than keeping copies, the sketch uses symbolic links that mirror the repository layout:
+The ESP compiles the same SML codec, protocol definitions and bootloader layout as the dsPIC, so the two ends cannot quietly disagree about where a field is. The Arduino build only compiles files in the sketch folder and in `src/`, so the ESP keeps copies of them in `src/pic/sml/`: `sml.c`, `sml.h`, `sml_proto.h`, `boot_layout.h`, `boot_crc.h` and `boot_crc.c`, from `common/`. They are plain files, not symbolic links, so a checkout builds anywhere, Windows included, without special settings.
 
-| Link | Target |
-| --- | --- |
-| `src/common/enums.h`, `src/pic/sml/sml_proto.h`, `src/pic/sml/sml.c`, `src/pic/sml/sml.h` | `common/` |
+Edit the originals in `common/` only, then refresh the copies:
 
-`common/sml.h` includes `sml_proto.h` from its own folder, so `sml.c`, `sml.h` and `sml_proto.h` are linked side by side in `src/pic/sml/`. The links live under `src/` because the Arduino build only compiles source files in the sketch folder and in `src/`. Anything in another subfolder is copied into the build but never compiled, which produces some puzzling linker errors.
-
-On Windows, symbolic links need Developer Mode (or an administrator prompt) and `git config core.symlinks true` before checkout. Alternatively, `mklink` in cmd from `esp_src\src`:
-
-```bat
-mklink common\enums.h      ..\..\..\common\enums.h
-mklink pic\sml\sml_proto.h ..\..\..\..\common\sml_proto.h
-mklink pic\sml\sml.c       ..\..\..\..\common\sml.c
-mklink pic\sml\sml.h       ..\..\..\..\common\sml.h
+```
+python3 tools/sync_common.py          # copies whatever differs
+python3 tools/sync_common.py --check  # changes nothing; fails, listing them, if any differ
 ```
 
-Failing that, copying the four files into place also works, provided they are copied again whenever the originals change.
+The ESP's host tests (`tests/commands`, `tests/pic_update`) run `--check` first, so a copy left behind fails them. The same tool keeps the helper sketches' copies of `partitions.csv` in `etc/`.
 
 ## Tests and formatting
 
@@ -56,10 +48,10 @@ The console commands and the PIC link have their own, in `tests/commands`: every
 | `esp_src.ino` | `setup()` and `loop()` |
 | `src/board.h`, `src/version.h` | Pin map and baud rates, firmware version |
 | `src/common/` | Links to the shared protocol definitions |
-| `src/pic/` | The PIC link: SML framing, the PIC's console text, its held state, commands in both directions, pairing TIME-AUTH with the epoch edge. Also the PIC state report, and the PIC's updates: its files (`pic_file`), their staging in `picfw` (`pic_store`), the bootloader exchange (`pic_update`), the SPL's update (`spl_update`) and their console glue (`pic_boot`). `sml/` links to the shared SML codec and boot layout |
+| `src/pic/` | The PIC link: SML framing, the PIC's console text, its held state, commands in both directions, pairing TIME-AUTH with the epoch edge. Also the PIC state report, and the PIC's updates: its files (`pic_file`), their staging in `picfw` (`pic_store`), the bootloader exchange (`pic_update`), the SPL's update (`spl_update`) and their console glue (`pic_boot`). `sml/` holds copies of the shared SML codec and boot layout (`tools/sync_common.py`) |
 | `src/timing/` | NTP client and packet handling, the clock model, ESP PPS output, PIC epoch and GNSS PPS capture |
 | `src/tz/` | tzinfo lookups and cache, TZ-STATE assembly, TIME-LEAP |
-| `src/net/` | WiFi, dual-stack connections with fallback, Telnet, the update manifest and updates, STAT-NET |
+| `src/net/` | WiFi, dual-stack connections with fallback, Telnet and its password, the update manifest and updates, STAT-NET |
 | `src/console/` | Console line input and output, the command table |
 | `src/settings/` | Preferences stored in NVS |
 | `src/util/` | Argument parsing, time formatting, SHA-256 |
@@ -338,6 +330,10 @@ On the PIC's side, an application started by an unconfirmed SPL that runs health
 While a download holds up the main loop, the PIC link is still drained between reads (`pic_link_poll()`), so its 4 KB receive buffer does not overflow. A command from the PIC that arrives then is answered BUSY. Bytes are still lost while the ESP erases or writes its flash (the UART's 128-byte FIFO overruns with its interrupt held off, at 921600 baud in under 1.5 ms), so broken frames are expected then. The PIC's raw console text is printed a whole line at a time, and a line holding any byte no console text has (a broken frame's header or payload), or still unfinished when a whole frame arrives, is dropped and counted (`pic -v`, `Text:`). A line that pauses part-way, as the PIC's start-up banner does, is printed whole when it ends. The PIC's terminal controls (the clear screen at its start) are left out.
 
 # Telnet
+
+Telnet gets the same commands as the USB-UART console, but on each connection only those that look until `telnet login <password>`: anything that changes something answers `telnet: log in first (telnet login <password>)` and does nothing. The rule is kept in one place, `needs_login()` in `src/console/commands.cpp`: open are the status commands, a setting shown without a value, `pic stored`, `pic boot` (not `run` or `hold`), `ntp tracking`, `ntp sync`, `wifi scan`, `update check`, `debug`, `verbose` and `help`; everything else, and any command added later, is protected. `help` marks protected commands with `*`.
+
+The password (`src/net/telnet_auth.cpp`) is kept as a SHA-256 of a random salt and the password, in NVS (namespace `telnet`); until `telnet passwd` sets one, `TELNET_PASSWORD_DEFAULT` stands, and `telnet` shows `DEFAULT PASSWORD`. Five wrong passwords in a row, then each further one locks logins for 30 s, shared by every connection: other commands run meanwhile, and a good login or a new password (from USB-UART, say) clears it. The login lasts until the connection closes.
 
 Telnet gets a copy of all console output, the PIC's included. That copy never blocks: whatever the connection cannot take at once is dropped, and a note saying how much appears in the stream when there is room again. A plain write to a stalled connection waits up to 10 seconds in the network stack, holding up `loop()` (and the PIC link, and TIME-NTP) meanwhile, and after three such failures the Telnet library used to drop the client. Replies to commands typed at Telnet are still written normally.
 

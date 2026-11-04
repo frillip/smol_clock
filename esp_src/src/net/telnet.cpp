@@ -7,6 +7,7 @@
 #include "../console/commands.h"
 #include "../console/console.h"
 #include "../settings/user_prefs.h"
+#include "telnet_auth.h"
 #include "wifi_link.h"
 
 static ESPTelnetStream telnet;
@@ -20,6 +21,7 @@ static uint32_t tx_count;
 static uint32_t pending_dropped; // bytes dropped since the last note
 static uint32_t dropped_bytes;   // ... in all
 static uint32_t connections;
+static bool authorised; // this connection has logged in
 
 static void tx_flush(void);
 static uint32_t disconnections;
@@ -27,8 +29,10 @@ static uint32_t disconnections;
 static void on_connect(String ip)
 {
     Serial.printf("\nTelnet: %s connected\n", ip.c_str());
-    telnet.printf("\nSmol Clock, %s\n(type 'quit' or 'exit' to disconnect)\n> ",
+    telnet.printf("\nSmol Clock, %s\n(type 'quit' or 'exit' to disconnect; "
+                  "'telnet login <password>' to change anything)\n> ",
                   WiFi.getHostname());
+    authorised = false;
     console_line_clear(&line);
     tx_head = 0;
     tx_count = 0;
@@ -39,6 +43,7 @@ static void on_connect(String ip)
 static void on_disconnect(String ip)
 {
     Serial.printf("Telnet: %s disconnected\n", ip.c_str());
+    authorised = false;
     disconnections++;
 }
 
@@ -54,6 +59,7 @@ static void on_attempt(String ip)
 
 void telnet_init(Stream *output)
 {
+    telnet_auth_init();
     telnet.onConnect(on_connect);
     telnet.onConnectionAttempt(on_attempt);
     telnet.onReconnect(on_reconnect);
@@ -175,6 +181,18 @@ void telnet_set_port(Stream *output, uint16_t port)
     }
 }
 
+bool telnet_authorised(void)
+{
+    return authorised;
+}
+
+
+void telnet_set_authorised(bool on)
+{
+    authorised = on;
+}
+
+
 bool telnet_is_running(void)
 {
     return running;
@@ -280,13 +298,19 @@ void telnet_print(Stream *output, bool verbose)
     output->printf(", start-up %s", user_prefs.fields.telnet.flags.enabled ? "ON" : "OFF");
     if (running && telnet.isConnected())
     {
-        output->printf(", client %s", telnet.getIP().c_str());
+        output->printf(", client %s%s", telnet.getIP().c_str(),
+                       authorised ? " (logged in)" : "");
+    }
+    if (telnet_auth_is_default())
+    {
+        output->printf(", DEFAULT PASSWORD (telnet passwd)");
     }
     if (!verbose)
     {
         output->printf("\n");
         return;
     }
+    output->printf(", %lu wrong passwords since the last login", (unsigned long)telnet_auth_failures());
     output->printf(", %lu connections, %lu disconnections, %lu bytes dropped\n",
                    (unsigned long)connections, (unsigned long)disconnections,
                    (unsigned long)dropped_bytes);

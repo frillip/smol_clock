@@ -1,6 +1,7 @@
 /*
  * The telnet console: the same commands as the serial console, and a copy
- * of the console output while a client is connected. No authentication yet.
+ * of the console output while a client is connected. Commands that change
+ * anything need "telnet login" first on each connection (telnet_auth.h).
  *
  * The copy of the console output never blocks: it is buffered (8 KB) and
  * sent from telnet_service() as the connection takes it; what overflows the
@@ -25,6 +26,9 @@ void telnet_disable(Stream *output);
 void telnet_set_port(Stream *output, uint16_t port);
 
 bool telnet_is_running(void);
+// This connection has logged in: cleared at every connection and disconnection.
+bool telnet_authorised(void);
+void telnet_set_authorised(bool on);
 // The connected client's stream, or NULL. Blocking: for command replies.
 Stream *telnet_client(void);
 // Console output to the client, if any, without blocking (see above).
