@@ -882,7 +882,7 @@ The ESP side is described in the [ESP firmware README](../esp_src/README.md). In
 
 The ESP's NTP clock slews each routine correction in at 5ppm or less over about two poll intervals, and polls more often while its corrections are large (from 128 seconds up to `ntp.interval`). A step or a faster slew sets TIME-NTP `CORRECTING`.
 
-The ESP links to `common/sml.c`, `sml.h`, `sml_proto.h` and `enums.h` from inside its sketch, rather than keeping copies.
+The ESP keeps copies of `common/sml.c`, `sml.h` and `sml_proto.h` inside its sketch (`esp_src/src/pic/sml/`), refreshed by `tools/sync_common.py`, whose `--check` the ESP's host tests run.
 
 ## Statistics and Allan deviation
 
