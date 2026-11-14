@@ -217,7 +217,8 @@ def build(args):
     return made
 
 
-def main(argv=None):
+def parse_args(argv=None):
+    """The arguments, as main() takes them: for release.py too."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0].rstrip(":") + ".")
     parser.add_argument("--config", default="",
                         help="the ESP's update config it is for, and its folder (default: none, in prod/)")
@@ -240,6 +241,11 @@ def main(argv=None):
         args.config = ""
     if not args.base_url.endswith("/"):
         args.base_url += "/"
+    return args
+
+
+def main(argv=None):
+    args = parse_args(argv)
     try:
         made = build(args)
     except (DistError, mi.ImageError, OSError) as error:

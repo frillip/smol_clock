@@ -11,7 +11,6 @@
 /nbproject/*.mk
 /nbproject/*.bash
 /nbproject/Makefile-genesis.properties
-/tests/
 
 # Object files
 *.o

@@ -1,0 +1,8 @@
+# What the tests' Makefiles build: the test programs (no extension) and objects.
+test_*
+!test_*.*
+sim_new
+sim_old
+spl_sim
+*.o
+__pycache__/

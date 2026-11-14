@@ -1,0 +1,49 @@
+# Every push and pull request: every host test, and the ESP's build.
+# The PIC's builds need MPLAB X and XC16, and are made by tools/release.py.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  ESP32_CORE: "3.3.12"
+  ESP32_INDEX: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+  ESP_FQBN: esp32:esp32:esp32:FlashSize=16M,PartitionScheme=custom
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Host tests
+        run: python3 tools/run_tests.py
+
+  esp-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Cache the esp32 core
+        uses: actions/cache@v4
+        with:
+          path: ~/.arduino15
+          key: arduino15-esp32-${{ env.ESP32_CORE }}
+      - name: esp32 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls "$ESP32_INDEX"
+          arduino-cli core update-index
+          arduino-cli core install "esp32:esp32@$ESP32_CORE"
+      - name: Build
+        run: >
+          arduino-cli compile --fqbn "$ESP_FQBN" --libraries esp_src/libraries
+          --export-binaries --warnings default esp_src
+      - uses: actions/upload-artifact@v4
+        with:
+          name: esp-image
+          path: esp_src/build/esp32.esp32.esp32/esp_src.ino.bin
