@@ -3,13 +3,26 @@
 #include <Arduino.h>
 #include <esp_random.h>
 #include <esp_timer.h>
-#include <lwip/sockets.h>
+#include <freertos/queue.h>
+#include <lwip/pbuf.h>
+#include <lwip/tcpip.h>
+#include <lwip/udp.h>
 #include <string.h>
 
 #define TASK_STACK_BYTES 4096
 #define TASK_PRIORITY    5
+#define ARRIVALS         4 // replies queued by the callback, a burst's worth
+
+// A reply as the callback took it: T4 and its first NTP_PACKET_BYTES.
+typedef struct
+{
+    int64_t t4;
+    uint16_t length;
+    uint8_t bytes[NTP_PACKET_BYTES];
+} Arrival;
 
 static TaskHandle_t task;
+static QueueHandle_t arrivals;
 static portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
 static NtpServerAddress server_address;
 static volatile bool busy;
@@ -23,37 +36,74 @@ static uint64_t random_cookie(void)
 }
 
 
+/*
+ * A reply arriving, in lwIP's own task: T4 taken first thing, before the
+ * hand-over to the client task, so it does not include waking that task
+ * (the socket's mailbox and a context switch: tens of us, and with them
+ * much of the ESP's own asymmetry, about 100 us on the test LAN).
+ */
+static void on_reply(void *argument, struct udp_pcb *pcb, struct pbuf *packet, const ip_addr_t *from,
+                     u16_t port)
+{
+    Arrival arrival;
+
+    (void)argument;
+    (void)pcb;
+    (void)from;
+    (void)port;
+    arrival.t4 = esp_timer_get_time();
+    arrival.length = pbuf_copy_partial(packet, arrival.bytes, sizeof(arrival.bytes), 0);
+    pbuf_free(packet);
+    xQueueSend(arrivals, &arrival, 0); // full: dropped, as a socket would when full
+}
+
+
 // One request and its reply. True with a sample; poll->last_result and
 // poll->kiss say why not.
-static bool exchange(int sock, const struct sockaddr_storage *server, socklen_t length,
-                     EspClockSample *sample, NtpPollResult *poll)
+static bool exchange(struct udp_pcb *pcb, const ip_addr_t *server, EspClockSample *sample,
+                     NtpPollResult *poll)
 {
-    uint8_t packet[NTP_PACKET_BYTES];
+    uint8_t request[NTP_PACKET_BYTES];
     uint64_t cookie = random_cookie();
+    struct pbuf *packet;
     NtpReply reply;
+    Arrival arrival;
+    err_t sent;
     int64_t t1;
     int64_t t4;
     int64_t deadline;
 
-    ntp_packet_request(packet, cookie);
+    ntp_packet_request(request, cookie);
+    LOCK_TCPIP_CORE();
+    packet = pbuf_alloc(PBUF_TRANSPORT, sizeof(request), PBUF_RAM);
+    if (packet == NULL)
+    {
+        UNLOCK_TCPIP_CORE();
+        return false;
+    }
+    memcpy(packet->payload, request, sizeof(request));
+    sent = udp_sendto(pcb, packet, server, NTP_PORT);
+    // T1 once lwIP has handed the request to the Wi-Fi driver: not its own
+    // processing, only the driver's queue and the air.
     t1 = esp_timer_get_time();
-    if (sendto(sock, packet, sizeof(packet), 0, (const struct sockaddr *)server, length) !=
-        (int)sizeof(packet))
+    pbuf_free(packet);
+    UNLOCK_TCPIP_CORE();
+    if (sent != ERR_OK)
     {
         return false;
     }
     deadline = t1 + NTP_CLIENT_TIMEOUT_MS * 1000LL;
     for (;;)
     {
-        int received = recvfrom(sock, packet, sizeof(packet), 0, NULL, NULL);
+        int64_t wait_us = deadline - esp_timer_get_time();
 
-        t4 = esp_timer_get_time();
-        if (received < 0)
+        if (wait_us < 0 || xQueueReceive(arrivals, &arrival, pdMS_TO_TICKS(wait_us / 1000 + 1)) != pdTRUE)
         {
             stats.timeouts++;
             return false;
         }
-        NtpReplyResult outcome = ntp_packet_parse(packet, (uint32_t)received, cookie, &reply);
+        t4 = arrival.t4;
+        NtpReplyResult outcome = ntp_packet_parse(arrival.bytes, arrival.length, cookie, &reply);
         poll->last_result = outcome;
         if (outcome == NTP_REPLY_OK)
         {
@@ -87,51 +137,37 @@ static bool exchange(int sock, const struct sockaddr_storage *server, socklen_t 
 }
 
 
-// The server's socket address, and its address as text: as IPAddress
-// writes it, as everywhere else (lwIP's inet_ntop writes IPv6 in capitals).
-static socklen_t server_socket_address(const NtpServerAddress *address,
-                                       struct sockaddr_storage *server, char *text, size_t size)
-{
-    IPAddress shown(address->ipv6 ? IPv6 : IPv4, address->bytes, address->zone);
-
-    snprintf(text, size, "%s", shown.toString().c_str());
-    memset(server, 0, sizeof(*server));
-    if (address->ipv6)
-    {
-        struct sockaddr_in6 *six = (struct sockaddr_in6 *)server;
-
-        six->sin6_family = AF_INET6;
-        six->sin6_port = htons(NTP_PORT);
-        memcpy(six->sin6_addr.s6_addr, address->bytes, 16);
-        six->sin6_scope_id = address->zone;
-        return sizeof(*six);
-    }
-    struct sockaddr_in *four = (struct sockaddr_in *)server;
-
-    four->sin_family = AF_INET;
-    four->sin_port = htons(NTP_PORT);
-    memcpy(&four->sin_addr.s_addr, address->bytes, 4);
-    return sizeof(*four);
-}
-
-
+/*
+ * A poll on lwIP's raw UDP API (under the TCPIP core lock, which this core
+ * builds with), not a socket, for the earlier T4 (on_reply) and T1
+ * (exchange). Its requests carry DSCP EF (NTP_CLIENT_DSCP): Wi-Fi with WMM
+ * queues them ahead of bulk traffic, where the driver and the access point
+ * honour it, so less queueing, and less of it on one side only.
+ */
 static void poll_server(const NtpServerAddress *address, NtpPollResult *poll)
 {
-    struct sockaddr_storage server;
-    struct timeval timeout = {NTP_CLIENT_TIMEOUT_MS / 1000, (NTP_CLIENT_TIMEOUT_MS % 1000) * 1000};
-    socklen_t length;
-    int sock;
+    IPAddress shown(address->ipv6 ? IPv6 : IPv4, address->bytes, address->zone);
+    ip_addr_t server;
+    struct udp_pcb *pcb;
     int index;
 
     memset(poll, 0, sizeof(*poll));
-    length = server_socket_address(address, &server, poll->address, sizeof(poll->address));
-
-    sock = socket(server.ss_family, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock < 0)
+    // As IPAddress writes it, as everywhere else.
+    snprintf(poll->address, sizeof(poll->address), "%s", shown.toString().c_str());
+    shown.to_ip_addr_t(&server);
+    xQueueReset(arrivals); // anything late from the last poll
+    LOCK_TCPIP_CORE();
+    pcb = udp_new_ip_type(IPADDR_TYPE_ANY);
+    if (pcb != NULL)
+    {
+        pcb->tos = NTP_CLIENT_DSCP << 2;
+        udp_recv(pcb, on_reply, NULL);
+    }
+    UNLOCK_TCPIP_CORE();
+    if (pcb == NULL)
     {
         return;
     }
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     for (index = 0; index < NTP_CLIENT_BURST; index++)
     {
         EspClockSample sample;
@@ -140,7 +176,7 @@ static void poll_server(const NtpServerAddress *address, NtpPollResult *poll)
         {
             vTaskDelay(pdMS_TO_TICKS(NTP_CLIENT_SPACING_MS));
         }
-        if (exchange(sock, &server, length, &sample, poll))
+        if (exchange(pcb, &server, &sample, poll))
         {
             if (!poll->ok || sample.delay_us < poll->sample.delay_us)
             {
@@ -154,7 +190,9 @@ static void poll_server(const NtpServerAddress *address, NtpPollResult *poll)
             break; // told to go away: no more requests this poll
         }
     }
-    close(sock);
+    LOCK_TCPIP_CORE();
+    udp_remove(pcb); // no callback after this
+    UNLOCK_TCPIP_CORE();
 }
 
 
@@ -183,6 +221,7 @@ static void client_task(void *argument)
 
 void ntp_client_init(void)
 {
+    arrivals = xQueueCreate(ARRIVALS, sizeof(Arrival));
     xTaskCreatePinnedToCore(client_task, "ntp", TASK_STACK_BYTES, NULL, TASK_PRIORITY, &task,
                             ARDUINO_RUNNING_CORE);
 }

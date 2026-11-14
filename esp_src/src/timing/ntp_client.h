@@ -17,8 +17,11 @@
  * polls the preferred family's address, and the other's if that one never
  * answers.
  *
- * T1 and T4 are esp_timer microseconds taken immediately around sendto and
- * recvfrom in a task that outranks the loop, so they carry no loop latency.
+ * T1 and T4 are esp_timer microseconds, as close to the wire as lwIP lets
+ * them be (2026-11-11, was around sendto and recvfrom): T1 once udp_sendto
+ * has handed the request to the Wi-Fi driver, T4 in lwIP's own task as the
+ * reply arrives, before the client task is woken. The requests carry DSCP
+ * EF, so Wi-Fi with WMM queues them ahead of bulk traffic.
  */
 #ifndef NTP_CLIENT_H
 #define NTP_CLIENT_H
@@ -32,6 +35,7 @@
 #define NTP_CLIENT_BURST      4
 #define NTP_CLIENT_SPACING_MS 2000
 #define NTP_CLIENT_TIMEOUT_MS 1000
+#define NTP_CLIENT_DSCP       46 // EF, expedited forwarding (TOS 0xB8)
 
 typedef struct
 {

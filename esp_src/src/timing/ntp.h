@@ -4,21 +4,30 @@
  * model (esp_clock) by it alone, drives the ESP PPS (pps) and builds
  * SML-TIME-NTP for each PPS edge. The PIC sees one NTP source: this clock.
  *
- * Each server is its own client: it is resolved at each poll (the first
- * record lwIP returns for each family, preferred family first, the other
- * if the first never answers), and keeps its own reach, samples, jitter
- * and root distance. Two servers may resolve to the same address. The
- * first good sample of all sets the clock; after that, after every poll,
- * the servers whose offsets agree within their root distances are found,
- * and the closest of those followed (ntp_select.h). Changing server
- * restarts the frequency window (esp_clock_new_reference).
+ * Each server is its own client: it is resolved once and its addresses
+ * kept (the first record lwIP returns for each family, preferred family
+ * first, the other if the first never answers), again only after two failed
+ * polls, on network return, or weekly (resolve_if_needed in ntp.cpp), and
+ * keeps its own reach and statistics: up to 16 samples and a weighted line
+ * through them, as chronyd keeps them
+ * (ntp_stats.h), so each path is judged on its own. They start again when
+ * the server's address changes, or a sample is off its line by more than a
+ * step. Two servers may resolve to the same address. The first good sample
+ * of all sets the clock; after that, after every poll, each server's line
+ * is run on to now, the servers whose offsets agree within their root
+ * distances are found, the closest of those followed, and those that agree
+ * closely enough combined (ntp_select.h): the clock is steered to the
+ * combined offset at the combined frequency. Changing server restarts the
+ * clock's own sample window (esp_clock_new_reference), which its
+ * uncertainty, and its frequency before any server has a line, come from.
  *
  * Polling: each server at once when Wi-Fi comes up, then after 64, 128, 256 s while the
- * frequency is being learnt, then adaptively from 128 s up to ntp.interval:
- * twice as long after 4 corrections in a row under 500 us, half as long
- * after one over 2 ms, counting the corrections from the server followed;
- * every server is polled at that interval. A failed poll is retried after
- * 60 s, doubling up to the interval.
+ * frequency is being learnt, then adaptively from 128 s up to ntp.interval
+ * by chronyd's rule: longer while the followed server's line holds more
+ * than 8 samples, shorter while the runs test keeps it shorter (the
+ * crystal wandering) or a sample falls well off it; every server is polled
+ * at that interval. A failed poll is retried after 60 s, doubling up to
+ * the interval.
  *
  * Each correction is slewed in by the clock model (esp_clock.h): gently,
  * over about two polls, so the ESP PPS moves slowly enough for the PIC to
@@ -47,6 +56,14 @@ void ntp_resync(void);
 
 bool ntp_is_valid(void);  // the clock has been set
 bool ntp_is_synced(void); // ... and recently updated
+// ntp.asymmetry (user_prefs.h) set: every sample from now on, and those
+// kept, moved by it, so the lines carry on. Out of range: false.
+bool ntp_set_asymmetry(int32_t us);
+// The same for one server's ntp offset (0 DHCP's, 1 to 4), its own samples.
+bool ntp_set_offset(int server, int32_t us);
+// The servers steering the clock (followed and combined), bit n for server
+// n (0 DHCP's, 1 to 4 those set). 0 if none.
+uint8_t ntp_servers_in_use(void);
 // UTC now, whole seconds, if the clock is set.
 bool ntp_utc_now(uint32_t *utc_seconds);
 // UTC at a local time (esp_timer microseconds), if the clock is set.
@@ -61,8 +78,10 @@ bool ntp_servers_disagree(void);
 
 // Two lines for the status, or everything (ntp -v).
 void ntp_print(Stream *output, bool verbose);
-// Every server, as chronyc sources.
+// Every server, as chronyc sources; verbose adds ntp_print_stats.
 void ntp_print_sources(Stream *output, bool verbose);
+// Each server's fitted line, as chronyc sourcestats.
+void ntp_print_stats(Stream *output);
 // The server followed and the clock, as chronyc tracking.
 void ntp_print_tracking(Stream *output);
 

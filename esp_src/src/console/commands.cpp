@@ -15,6 +15,7 @@
 #include "../pic/pic_report.h"
 #include "../settings/user_prefs.h"
 #include "../timing/ntp.h"
+#include "../timing/ntp_gnss.h"
 #include "../tz/leap.h"
 #include "../tz/tzinfo.h"
 #include "../util/parse.h"
@@ -367,6 +368,7 @@ void commands_print_status(Stream *output, bool verbose)
 static void esp_restart(Stream *output)
 {
     output->printf("Restarting the ESP\n");
+    output->flush(); // a telnet reply may still be queued
     delay(100);
     ESP.restart();
 }
@@ -1097,27 +1099,136 @@ static const Entry pic_entries[] = {
 
 // ---- NTP, Wi-Fi, Telnet, updates ---------------------------------------------------
 
-// The clock and every server, as chronyc sources; everything with -v.
+// The clock and every server, as chronyc sources; everything with -v but
+// the 24 h minute table (ntp gnss -v, about 25 KB).
 static void bare_ntp(Stream *output, bool verbose)
 {
     if (verbose)
     {
         ntp_print(output, true);
+        ntp_gnss_print(output, false);
         return;
     }
     ntp_print(output, false);
     ntp_print_sources(output, false);
 }
 
+// ", offset +120 us" if server n (0 DHCP's) has one.
+static void print_ntp_offset(Stream *output, int server)
+{
+    if (user_prefs_ntp_offset_us[server] != 0)
+    {
+        output->printf(", offset %+ld us", (long)user_prefs_ntp_offset_us[server]);
+    }
+}
+
 static void print_ntp_server(Stream *output, int index)
 {
     const char *host = user_prefs_ntp_server(index);
 
-    output->printf("ntp server %d: %s\n", index + 1, host[0] != '\0' ? host : "NONE");
+    output->printf("ntp server %d: %s", index + 1, host[0] != '\0' ? host : "NONE");
+    print_ntp_offset(output, index + 1);
+    output->printf("\n");
 }
 
-// ntp server <n> [<host>|none]: server n (1 to 4) shown or set; with no n,
-// all four. Server 1 cannot be none. A new server is polled at once.
+static void print_ntp_dhcp(Stream *output)
+{
+    output->printf("ntp server 0: dhcp, %s (the server DHCP offers)",
+                   user_prefs_ntp_dhcp_name(user_prefs_ntp_dhcp));
+    print_ntp_offset(output, 0);
+    output->printf("\n");
+}
+
+// "offset <us>" after a server's number: true if the words were that (set,
+// or the reason not), false if not an offset at all.
+static bool ntp_server_offset(Stream *output, int server, const char *words)
+{
+    const char *number;
+    char *end;
+    long us;
+
+    if (strncasecmp(words, "offset", 6) != 0 || (words[6] != '\0' && words[6] != ' '))
+    {
+        return false;
+    }
+    number = words + 6;
+    while (*number == ' ')
+    {
+        number++;
+    }
+    if (*number == '\0')
+    {
+        output->printf("ntp server %d offset: %+ld us\n", server, (long)user_prefs_ntp_offset_us[server]);
+        return true;
+    }
+    us = strtol(number, &end, 10);
+    if (end == number || *end != '\0' || us < -NTP_OFFSET_MAX_US || us > NTP_OFFSET_MAX_US)
+    {
+        output->printf("ntp server %d offset: us, -%d to %d (+ = clock later)\n", server,
+                       NTP_OFFSET_MAX_US, NTP_OFFSET_MAX_US);
+        return true;
+    }
+    ntp_set_offset(server, (int32_t)us);
+    output->printf("ntp server %d offset: %+ld us\n", server, us);
+    return true;
+}
+
+// ntp server dhcp|0 [disable|enable|prefer]: server 0, DHCP's, shown or set.
+// True if the line was for it.
+static bool ntp_server_dhcp(Stream *output, const char *text)
+{
+    const char *mode;
+
+    if (strncasecmp(text, "dhcp", 4) == 0 && (text[4] == '\0' || text[4] == ' '))
+    {
+        mode = text + 4;
+    }
+    else if (text[0] == '0' && (text[1] == '\0' || text[1] == ' '))
+    {
+        mode = text + 1;
+    }
+    else
+    {
+        return false;
+    }
+    while (*mode == ' ')
+    {
+        mode++;
+    }
+    if (ntp_server_offset(output, 0, mode))
+    {
+        return true;
+    }
+    if (*mode != '\0')
+    {
+        int32_t chosen;
+
+        if (strcasecmp(mode, "disable") == 0)
+        {
+            chosen = NTP_DHCP_DISABLED;
+        }
+        else if (strcasecmp(mode, "enable") == 0)
+        {
+            chosen = NTP_DHCP_ENABLED;
+        }
+        else if (strcasecmp(mode, "prefer") == 0)
+        {
+            chosen = NTP_DHCP_PREFERRED;
+        }
+        else
+        {
+            output->printf("ntp server dhcp: disable, enable, prefer or offset <us>\n");
+            return true;
+        }
+        user_prefs_ntp_dhcp = chosen;
+    }
+    print_ntp_dhcp(output);
+    return true;
+}
+
+// ntp server <n> [<host>|none|offset <us>]: server n (1 to 4) shown or
+// set, or its path's offset; with no n, all of them, DHCP's (0) first.
+// Server 1 cannot be none. A new server is polled at once.
 static void ntp_server(Stream *output, const Entry *entry, const Value *value)
 {
     char text[USER_PREFS_MAX_STRING_SIZE + 8];
@@ -1129,6 +1240,7 @@ static void ntp_server(Stream *output, const Entry *entry, const Value *value)
     (void)entry;
     if (!value->given)
     {
+        print_ntp_dhcp(output);
         for (index = 0; index < NTP_SERVERS; index++)
         {
             print_ntp_server(output, index);
@@ -1136,10 +1248,15 @@ static void ntp_server(Stream *output, const Entry *entry, const Value *value)
         return;
     }
     snprintf(text, sizeof(text), "%s", value->text);
+    if (ntp_server_dhcp(output, text))
+    {
+        return;
+    }
     number = strtol(text, &end, 10);
     if (end == text || (*end != '\0' && *end != ' ') || number < 1 || number > NTP_SERVERS)
     {
-        output->printf("ntp server: which one, 1..%d, then the host\n", NTP_SERVERS);
+        output->printf("ntp server: which one, 1..%d, then the host (or dhcp disable|enable|prefer)\n",
+                       NTP_SERVERS);
         return;
     }
     index = (int)number - 1;
@@ -1153,9 +1270,18 @@ static void ntp_server(Stream *output, const Entry *entry, const Value *value)
         print_ntp_server(output, index);
         return;
     }
+    if (ntp_server_offset(output, index + 1, host))
+    {
+        return;
+    }
     if (strchr(host, ' ') != NULL || strlen(host) > USER_PREFS_MAX_STRING_SIZE)
     {
         output->printf("ntp server: bad host '%s'\n", host);
+        return;
+    }
+    if (strcasecmp(host, "dhcp") == 0)
+    {
+        output->printf("ntp server: DHCP's server is server 0: ntp server dhcp enable\n");
         return;
     }
     if (strcasecmp(host, "none") == 0)
@@ -1167,6 +1293,13 @@ static void ntp_server(Stream *output, const Entry *entry, const Value *value)
         }
         host[0] = '\0';
     }
+    if (strcmp(user_prefs_ntp_server(index), host) != 0 && user_prefs_ntp_offset_us[index + 1] != 0)
+    {
+        // Another path: the offset was for the old one.
+        output->printf("ntp server %d offset: %+ld us cleared\n", index + 1,
+                       (long)user_prefs_ntp_offset_us[index + 1]);
+        ntp_set_offset(index + 1, 0);
+    }
     user_prefs_set_string(user_prefs_ntp_server(index), host);
     output->printf("ntp server %d: %s%s\n", index + 1, host[0] != '\0' ? host : "NONE",
                    host[0] != '\0' ? ", polling" : "");
@@ -1177,6 +1310,20 @@ static void ntp_tracking(Stream *output, const Entry *entry, const Value *value)
     (void)entry;
     (void)value;
     ntp_print_tracking(output);
+    ntp_gnss_print(output, false);
+}
+
+
+static void ntp_gnss(Stream *output, const Entry *entry, const Value *value)
+{
+    (void)entry;
+    if (value->given)
+    {
+        ntp_gnss_reset();
+        output->printf("NTP vs GNSS: started again\n");
+        return;
+    }
+    ntp_gnss_print(output, value->verbose);
 }
 
 static void ntp_interval(Stream *output, const Entry *entry, const Value *value)
@@ -1189,6 +1336,16 @@ static void ntp_interval(Stream *output, const Entry *entry, const Value *value)
     output->printf("ntp interval: %lu s\n", (unsigned long)user_prefs.fields.ntp.interval);
 }
 
+static void ntp_asymmetry(Stream *output, const Entry *entry, const Value *value)
+{
+    (void)entry;
+    if (value->given)
+    {
+        ntp_set_asymmetry((int32_t)value->number);
+    }
+    output->printf("ntp asymmetry: %+ld us\n", (long)user_prefs_ntp_asymmetry_us);
+}
+
 static void ntp_sync(Stream *output, const Entry *entry, const Value *value)
 {
     (void)entry;
@@ -1198,12 +1355,16 @@ static void ntp_sync(Stream *output, const Entry *entry, const Value *value)
 }
 
 static const Entry ntp_entries[] = {
-    {"server", VALUE_WORDS, NULL, 0, 0, "1..4 <host>|none",
-     "NTP server 1 to 4 (2 to 4 optional), then poll it", ntp_server},
+    {"server", VALUE_WORDS, NULL, 0, 0, "<n> <host>|none|offset <us>",
+     "Servers 1..4; 0 or dhcp: disable|enable|prefer too", ntp_server},
     {"tracking", VALUE_NONE, NULL, 0, 0, "", "The server followed and the clock", ntp_tracking},
     {"interval", VALUE_DURATION, NULL, NTP_INTERVAL_MIN, NTP_INTERVAL_MAX, "<time>",
      "Longest poll interval (s, or 17m, 1h)", ntp_interval},
+    {"asymmetry", VALUE_NUMBER, NULL, -NTP_ASYMMETRY_MAX_US, NTP_ASYMMETRY_MAX_US, "<us>",
+     "Added to every sample, us (+ = clock later)", ntp_asymmetry},
     {"sync", VALUE_NONE, NULL, 0, 0, "", "Poll now", ntp_sync},
+    {"gnss", VALUE_OPTION, "reset", 0, 0, "[reset]",
+     "NTP against the PIC's GNSS lock; reset: start again", ntp_gnss},
 };
 
 static void bare_wifi(Stream *output, bool verbose)
@@ -1604,6 +1765,7 @@ static bool needs_login(const Noun *noun, const Entry *entry, const Value *value
     static const char *const open_nouns[] = {"status", "help", "verbose", "debug"};
     static const char *const open_actions[][2] = {
         {"pic", "stored"}, {"pic", "boot"},     {"ntp", "tracking"},  {"ntp", "sync"},
+        {"ntp", "gnss"},
         {"wifi", "scan"},  {"update", "check"}, {"telnet", "login"},
     };
     size_t index;

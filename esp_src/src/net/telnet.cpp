@@ -3,6 +3,8 @@
 #include <ESPTelnetStream.h>
 #include <WiFi.h>
 #include <lwip/sockets.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "../console/commands.h"
 #include "../console/console.h"
@@ -24,7 +26,56 @@ static uint32_t connections;
 static bool authorised; // this connection has logged in
 
 static void tx_flush(void);
+static void reply_discard(void);
+static size_t reply_write(const uint8_t *text, size_t length);
+static void reply_drain(uint32_t timeout_ms);
 static uint32_t disconnections;
+
+/*
+ * A command's reply: written to the socket as far as it takes it now, the
+ * rest queued (reply_*) and sent from telnet_service(), so a long reply
+ * (ntp gnss -v is about 25 KB) never holds up loop(). Written straight to
+ * the telnet stream, it did: seconds over Wi-Fi, with the TIME-NTP reports,
+ * the PIC link and the LED stopped meanwhile.
+ */
+class ReplyStream : public Stream
+{
+  public:
+    size_t write(uint8_t byte) override
+    {
+        return reply_write(&byte, 1);
+    }
+    size_t write(const uint8_t *buffer, size_t size) override
+    {
+        return reply_write(buffer, size);
+    }
+    int available(void) override
+    {
+        return 0;
+    }
+    int read(void) override
+    {
+        return -1;
+    }
+    int peek(void) override
+    {
+        return -1;
+    }
+    // Before a restart: what is queued, waiting up to a second for it.
+    void flush(void) override
+    {
+        reply_drain(1000);
+    }
+};
+
+static ReplyStream reply_stream;
+// The queued part of the reply, at reply[reply_head]; from the heap, grown
+// as needed up to REPLY_MAX_BYTES, freed once sent.
+#define REPLY_MAX_BYTES 49152U
+static uint8_t *reply;
+static uint32_t reply_size;
+static uint32_t reply_head;
+static uint32_t reply_count;
 
 static void on_connect(String ip)
 {
@@ -36,6 +87,7 @@ static void on_connect(String ip)
     console_line_clear(&line);
     tx_head = 0;
     tx_count = 0;
+    reply_discard();
     pending_dropped = 0;
     connections++;
 }
@@ -84,9 +136,14 @@ void telnet_service(void)
     if (!telnet.isConnected())
     {
         tx_count = 0;
+        reply_discard();
         return;
     }
     tx_flush();
+    if (reply_count != 0)
+    {
+        return; // the next command once this reply is out
+    }
     if (console_read_line(&line, &telnet, false))
     {
         if (strcmp(line.text, "quit") == 0 || strcmp(line.text, "exit") == 0)
@@ -96,8 +153,8 @@ void telnet_service(void)
         else
         {
             tx_flush(); // what came before, before the reply
-            commands_execute(&telnet, line.text);
-            telnet.print("> ");
+            commands_execute(&reply_stream, line.text);
+            reply_stream.print("> ");
         }
         console_line_clear(&line);
     }
@@ -200,7 +257,7 @@ bool telnet_is_running(void)
 
 Stream *telnet_client(void)
 {
-    return running && telnet.isConnected() ? &telnet : NULL;
+    return running && telnet.isConnected() ? &reply_stream : NULL;
 }
 
 // Into the buffer; what does not fit is dropped and counted.
@@ -231,6 +288,11 @@ void telnet_write_text(const uint8_t *text, size_t length)
     {
         return;
     }
+    if (reply_count != 0)
+    {
+        reply_write(text, length); // behind the reply, in order
+        return;
+    }
     if (pending_dropped != 0 && TX_BUFFER_BYTES - tx_count >= 48U + length)
     {
         char note[48];
@@ -254,7 +316,7 @@ static void tx_flush(void)
 {
     int fd;
 
-    if (tx_count == 0)
+    if (tx_count == 0 && reply_count == 0)
     {
         return;
     }
@@ -279,6 +341,123 @@ static void tx_flush(void)
         {
             return;
         }
+    }
+    // The ring is out: then the reply, which came after it.
+    while (reply_count != 0)
+    {
+        ssize_t sent = send(fd, reply + reply_head, reply_count, MSG_DONTWAIT);
+
+        if (sent <= 0)
+        {
+            return;
+        }
+        reply_head += (uint32_t)sent;
+        reply_count -= (uint32_t)sent;
+    }
+    reply_discard(); // all sent: the memory back
+}
+
+static void reply_discard(void)
+{
+    free(reply);
+    reply = NULL;
+    reply_size = 0;
+    reply_head = 0;
+    reply_count = 0;
+}
+
+// Queued behind what is there; what does not fit (REPLY_MAX_BYTES, or no
+// memory) is dropped and counted, as the console copy's is.
+static void reply_queue(const uint8_t *text, size_t length)
+{
+    uint32_t need;
+
+    if (reply_head != 0)
+    {
+        memmove(reply, reply + reply_head, reply_count);
+        reply_head = 0;
+    }
+    need = reply_count + (uint32_t)length;
+    if (need > reply_size)
+    {
+        uint32_t size = reply_size != 0 ? reply_size : 1024U;
+        uint8_t *grown;
+
+        while (size < need && size < REPLY_MAX_BYTES)
+        {
+            size *= 2U;
+        }
+        if (size > REPLY_MAX_BYTES)
+        {
+            size = REPLY_MAX_BYTES;
+        }
+        grown = (uint8_t *)realloc(reply, size);
+        if (grown != NULL)
+        {
+            reply = grown;
+            reply_size = size;
+        }
+    }
+    if (length > reply_size - reply_count)
+    {
+        pending_dropped += (uint32_t)(length - (reply_size - reply_count));
+        dropped_bytes += (uint32_t)(length - (reply_size - reply_count));
+        length = reply_size - reply_count;
+    }
+    if (length != 0)
+    {
+        memcpy(reply + reply_count, text, length);
+        reply_count += (uint32_t)length;
+    }
+}
+
+/*
+ * Straight to the socket while nothing is queued ahead of it (the console
+ * copy's ring, or an earlier part of the reply), without waiting; the rest
+ * queued. A command's progress lines still go out as it runs.
+ */
+static size_t reply_write(const uint8_t *text, size_t length)
+{
+    size_t taken = length;
+
+    if (!running || !telnet.isConnected())
+    {
+        return taken;
+    }
+    tx_flush();
+    if (tx_count == 0 && reply_count == 0)
+    {
+        int fd = telnet.getClient().fd();
+
+        while (fd >= 0 && length != 0)
+        {
+            ssize_t sent = send(fd, text, length, MSG_DONTWAIT);
+
+            if (sent <= 0)
+            {
+                break;
+            }
+            text += sent;
+            length -= (size_t)sent;
+        }
+    }
+    if (length != 0)
+    {
+        reply_queue(text, length);
+    }
+    return taken;
+}
+
+// Waiting for the queue to go, up to timeout_ms: only before a restart.
+static void reply_drain(uint32_t timeout_ms)
+{
+    uint32_t start = millis();
+
+    while ((tx_count != 0 || reply_count != 0) && telnet.isConnected() &&
+           millis() - start < timeout_ms)
+    {
+        tx_flush();
+        delay(5);
     }
 }
 

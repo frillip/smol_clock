@@ -29,7 +29,9 @@ bool telnet_is_running(void);
 // This connection has logged in: cleared at every connection and disconnection.
 bool telnet_authorised(void);
 void telnet_set_authorised(bool on);
-// The connected client's stream, or NULL. Blocking: for command replies.
+// The connected client's stream for command replies, or NULL. It does not
+// block: what the connection cannot take at once is queued (up to 48 KB)
+// and sent from telnet_service(); flush() waits up to a second for it.
 Stream *telnet_client(void);
 // Console output to the client, if any, without blocking (see above).
 void telnet_write_text(const uint8_t *text, size_t length);

@@ -243,11 +243,15 @@ Values are written as people write them: on/off (or 1/0, yes/no), offsets as `+5
 
 | Command | Description |
 | --- | --- |
-| `ntp [-v]` | NTP status and the servers, as `chronyc sources`: which is followed (`*`), which agree (`+`), which are outvoted (`x`) or unusable (`?`), with stratum, poll interval, reach, offset and root distance. `-v` adds round trips, jitter, counters, frequency and slew |
+| `ntp [-v]` | NTP status and the servers, as `chronyc sources`: which is followed (`*`), which agree (`+`), which are outvoted (`x`) or unusable (`?`), with stratum, poll interval, reach, offset and root distance. `-v` adds round trips, jitter, counters, frequency and slew, and each server's line as `chronyc sourcestats` |
 | `ntp tracking` | The server followed and the clock, as `chronyc tracking` |
 | `ntp server 1..4 <host>\|none` | Up to four NTP servers, names or IPv4 or IPv6 addresses, a new one polled at once. 2 to 4 are optional, and `ntp server` lists them. By default `rubidium.darksky.io`, `time.cloudflare.com` and `ntp1.npl.co.uk` |
+| `ntp server dhcp disable\|enable\|prefer` | Server 0: the NTP server DHCP offers (option 42, IPv4), polled before server 1. `enable` (the default) makes it one server among the others, `prefer` follows it alone while it agrees with the others (as chronyd's `prefer`) |
 | `ntp interval <time>` | The longest poll interval, 128s–1d, default 512s |
+| `ntp asymmetry <us>` | Added to every NTP sample, ±10000µs, default 0 (+ makes the clock later): the ESP's own end of every path. On a clock with GNSS, `ntp gnss` measures it: set the negative of its long-run mean (about +100 on the test LAN). It can't fix a path's own asymmetry |
+| `ntp server 0..4 offset <us>` | Added to one server's samples on top of `ntp asymmetry`, ±10000µs, default 0 (+ makes the clock later), as chronyd's `offset`: for that server's path. Server 0 is DHCP's. A new host for a server clears its offset |
 | `ntp sync` | Poll now |
+| `ntp gnss [reset] [-v]` | On a clock with GNSS: the ESP's NTP time against it, last hour and since start (`-v` also minute by minute, for the last 24 hours); `reset` starts again |
 | `wifi [-v]` | Connection status, SSID, IPv4 and IPv6 addresses and signal, `-v` adds every IPv6 address, gateway, DNS servers, which address family is preferred, channel, power save (always off, for timing) and MAC |
 | `wifi scan` | Scan nearby networks |
 | `wifi connect`, `wifi disconnect` | Reconnect, or disconnect (the reconnect task may reconnect later) |

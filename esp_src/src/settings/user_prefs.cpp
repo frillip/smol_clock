@@ -8,13 +8,22 @@
 #define NAMESPACE "CLOCK_PREFS"
 #define KEY       "PREF_STRUCT"
 #define NTP_KEY   "NTP_SERVERS"
+#define ASYM_KEY  "NTP_ASYM"
+#define DHCP_KEY  "NTP_DHCP"
+#define OFFS_KEY  "NTP_OFFS"
 
 UserPrefs user_prefs;
 UserPrefsNtp user_prefs_ntp;
+int32_t user_prefs_ntp_asymmetry_us;
+int32_t user_prefs_ntp_dhcp;
+int32_t user_prefs_ntp_offset_us[NTP_SERVERS + 1];
 
 static Preferences store;
 static UserPrefs saved; // as last loaded or saved, to tell what is unsaved
 static UserPrefsNtp saved_ntp;
+static int32_t saved_asymmetry_us;
+static int32_t saved_dhcp;
+static int32_t saved_offset_us[NTP_SERVERS + 1];
 static const char *const ntp_defaults[NTP_SERVERS] = NTP_SERVER_DEFAULTS;
 
 void user_prefs_set_string(char *field, const char *value)
@@ -55,6 +64,9 @@ void user_prefs_reset(void)
     user_prefs_set_string(p->fields.updater.server, UPDATER_SERVER_DEFAULT);
     user_prefs_set_string(p->fields.updater.path, UPDATER_PATH_DEFAULT);
     user_prefs_set_string(p->fields.updater.config, UPDATER_CONFIG_DEFAULT);
+    user_prefs_ntp_asymmetry_us = NTP_ASYMMETRY_DEFAULT_US;
+    user_prefs_ntp_dhcp = NTP_DHCP_DEFAULT;
+    memset(user_prefs_ntp_offset_us, 0, sizeof(user_prefs_ntp_offset_us));
     memset(&user_prefs_ntp, 0, sizeof(user_prefs_ntp));
     user_prefs_ntp.header = USER_PREFS_HEADER_VALUE;
     for (int index = 0; index < NTP_SERVERS; index++)
@@ -83,6 +95,17 @@ static unsigned repair(Stream *output)
            user_prefs_set_string(p->fields.ntp.server, ntp_defaults[0]));
     REPAIR(p->fields.ntp.interval >= NTP_INTERVAL_MIN && p->fields.ntp.interval <= NTP_INTERVAL_MAX,
            "ntp.interval", p->fields.ntp.interval = NTP_INTERVAL_DEFAULT);
+    REPAIR(user_prefs_ntp_asymmetry_us >= -NTP_ASYMMETRY_MAX_US &&
+               user_prefs_ntp_asymmetry_us <= NTP_ASYMMETRY_MAX_US,
+           "ntp.asymmetry", user_prefs_ntp_asymmetry_us = NTP_ASYMMETRY_DEFAULT_US);
+    REPAIR(user_prefs_ntp_dhcp >= NTP_DHCP_DISABLED && user_prefs_ntp_dhcp <= NTP_DHCP_PREFERRED,
+           "ntp.dhcp", user_prefs_ntp_dhcp = NTP_DHCP_DEFAULT);
+    for (int index = 0; index <= NTP_SERVERS; index++)
+    {
+        REPAIR(user_prefs_ntp_offset_us[index] >= -NTP_OFFSET_MAX_US &&
+                   user_prefs_ntp_offset_us[index] <= NTP_OFFSET_MAX_US,
+               "ntp.offset", user_prefs_ntp_offset_us[index] = 0);
+    }
     REPAIR(string_ok(p->fields.rtzinfo.server) && p->fields.rtzinfo.server[0] != '\0',
            "rtzinfo.server",
            user_prefs_set_string(p->fields.rtzinfo.server, TZINFO_SERVER_DEFAULT));
@@ -133,6 +156,16 @@ void user_prefs_init(Stream *output)
     {
         store.getBytes(KEY, user_prefs.raw, sizeof(user_prefs.raw));
     }
+    // Not stored (older firmware): the default, and nothing to repair.
+    user_prefs_ntp_asymmetry_us =
+        store.isKey(ASYM_KEY) ? store.getInt(ASYM_KEY, NTP_ASYMMETRY_DEFAULT_US) : NTP_ASYMMETRY_DEFAULT_US;
+    user_prefs_ntp_dhcp = store.isKey(DHCP_KEY) ? store.getInt(DHCP_KEY, NTP_DHCP_DEFAULT) : (int32_t)NTP_DHCP_DEFAULT;
+    // Not stored (older firmware) or another size: none.
+    memset(user_prefs_ntp_offset_us, 0, sizeof(user_prefs_ntp_offset_us));
+    if (store.getBytesLength(OFFS_KEY) == sizeof(user_prefs_ntp_offset_us))
+    {
+        store.getBytes(OFFS_KEY, user_prefs_ntp_offset_us, sizeof(user_prefs_ntp_offset_us));
+    }
     stored_ntp = store.getBytesLength(NTP_KEY);
     if (stored_ntp == sizeof(user_prefs_ntp))
     {
@@ -171,13 +204,18 @@ void user_prefs_init(Stream *output)
     }
     saved = user_prefs;
     saved_ntp = user_prefs_ntp;
+    saved_asymmetry_us = user_prefs_ntp_asymmetry_us;
+    saved_dhcp = user_prefs_ntp_dhcp;
+    memcpy(saved_offset_us, user_prefs_ntp_offset_us, sizeof(saved_offset_us));
 }
 
 
 bool user_prefs_unsaved(void)
 {
     return memcmp(saved.raw, user_prefs.raw, sizeof(saved.raw)) != 0 ||
-           memcmp(&saved_ntp, &user_prefs_ntp, sizeof(saved_ntp)) != 0;
+           memcmp(&saved_ntp, &user_prefs_ntp, sizeof(saved_ntp)) != 0 ||
+           saved_asymmetry_us != user_prefs_ntp_asymmetry_us || saved_dhcp != user_prefs_ntp_dhcp ||
+           memcmp(saved_offset_us, user_prefs_ntp_offset_us, sizeof(saved_offset_us)) != 0;
 }
 
 
@@ -186,9 +224,26 @@ void user_prefs_save(void)
     store.begin(NAMESPACE, false);
     store.putBytes(KEY, user_prefs.raw, sizeof(user_prefs.raw));
     store.putBytes(NTP_KEY, &user_prefs_ntp, sizeof(user_prefs_ntp));
+    store.putInt(ASYM_KEY, user_prefs_ntp_asymmetry_us);
+    store.putInt(DHCP_KEY, user_prefs_ntp_dhcp);
+    store.putBytes(OFFS_KEY, user_prefs_ntp_offset_us, sizeof(user_prefs_ntp_offset_us));
     store.end();
     saved = user_prefs;
     saved_ntp = user_prefs_ntp;
+    saved_asymmetry_us = user_prefs_ntp_asymmetry_us;
+    saved_dhcp = user_prefs_ntp_dhcp;
+    memcpy(saved_offset_us, user_prefs_ntp_offset_us, sizeof(saved_offset_us));
+}
+
+
+const char *user_prefs_ntp_dhcp_name(int32_t mode)
+{
+    switch (mode)
+    {
+        case NTP_DHCP_DISABLED: return "disable";
+        case NTP_DHCP_PREFERRED: return "prefer";
+        default: return "enable";
+    }
 }
 
 
@@ -197,7 +252,8 @@ void user_prefs_print(Stream *output)
     const UserPrefs *p = &user_prefs;
 
     output->printf("Settings: %s\n", user_prefs_unsaved() ? "NOT SAVED" : "saved");
-    output->printf("  NTP: 1: %s", p->fields.ntp.server);
+    output->printf("  NTP: 0: DHCP's, %s; 1: %s", user_prefs_ntp_dhcp_name(user_prefs_ntp_dhcp),
+                   p->fields.ntp.server);
     for (int index = 1; index < NTP_SERVERS; index++)
     {
         if (user_prefs_ntp_server(index)[0] != '\0')
@@ -205,7 +261,16 @@ void user_prefs_print(Stream *output)
             output->printf(", %d: %s", index + 1, user_prefs_ntp_server(index));
         }
     }
-    output->printf("; interval %lu s\n", (unsigned long)p->fields.ntp.interval);
+    output->printf("; interval %lu s; asymmetry %+ld us", (unsigned long)p->fields.ntp.interval,
+                   (long)user_prefs_ntp_asymmetry_us);
+    for (int index = 0; index <= NTP_SERVERS; index++)
+    {
+        if (user_prefs_ntp_offset_us[index] != 0)
+        {
+            output->printf("; %d offset %+ld us", index, (long)user_prefs_ntp_offset_us[index]);
+        }
+    }
+    output->printf("\n");
     output->printf("  TZ lookups: %s, https://%s%s, every ",
                    p->fields.rtzinfo.flags.enabled ? "ON" : "OFF", p->fields.rtzinfo.server,
                    p->fields.rtzinfo.path);

@@ -1,5 +1,7 @@
 #include "wifi_link.h"
 
+#include "dhcp_ntp.h"
+
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <esp_netif.h>
@@ -69,6 +71,7 @@ void wifi_link_init(Stream *output)
     power_save_off();
     WiFi.mode(WIFI_STA);
     WiFi.enableIPv6(); // SLAAC once connected
+    dhcp_ntp_init(); // before the first lease
     manager.setConfigPortalBlocking(false);
     manager.setConfigPortalTimeout(PORTAL_TIMEOUT_S);
     manager.setConnectTimeout(5);
@@ -284,6 +287,7 @@ void wifi_link_forget(void)
 void wifi_link_clear(Stream *output)
 {
     output->printf("Clearing the Wi-Fi settings and restarting\n");
+    output->flush(); // a telnet reply may still be queued
     wifi_link_forget();
     delay(100);
     ESP.restart();

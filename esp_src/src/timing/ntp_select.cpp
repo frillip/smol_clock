@@ -3,6 +3,13 @@
 #include <math.h>
 #include <string.h>
 
+// What the followed server is chosen by: rank_us if given, else the distance.
+static int64_t rank_us(const NtpCandidate *candidate)
+{
+    return candidate->rank_us > 0 ? candidate->rank_us : candidate->distance_us;
+}
+
+
 static int members(unsigned set)
 {
     int count = 0;
@@ -122,8 +129,7 @@ void ntp_select(const NtpCandidate *candidates, int count, int current, NtpSelec
         else
         {
             selection->verdict[index] = NTP_VERDICT_CANDIDATE;
-            if (selection->selected < 0 ||
-                c->distance_us < candidates[selection->selected].distance_us)
+            if (selection->selected < 0 || rank_us(c) < rank_us(&candidates[selection->selected]))
             {
                 selection->selected = index;
             }
@@ -131,7 +137,7 @@ void ntp_select(const NtpCandidate *candidates, int count, int current, NtpSelec
     }
     // Keep the server in use unless another is twice as close.
     if (current >= 0 && current < count && (best & (1U << current)) != 0 &&
-        candidates[selection->selected].distance_us * 2 >= candidates[current].distance_us)
+        rank_us(&candidates[selection->selected]) * 2 >= rank_us(&candidates[current]))
     {
         selection->selected = current;
     }
@@ -142,14 +148,22 @@ void ntp_select(const NtpCandidate *candidates, int count, int current, NtpSelec
 }
 
 
-void ntp_combine(const NtpCandidate *candidates, int count, NtpSelection *selection)
+void ntp_combine(const NtpCandidate *candidates, int count, uint8_t *distant,
+                 NtpSelection *selection)
 {
     const NtpCandidate *followed;
     double weights = 0.0;
     double sum = 0.0;
+    double frequency_weights = 0.0;
+    double frequency_sum = 0.0;
+    double inverse_skews = 0.0;
+    int64_t best_us;
     int index;
 
     selection->combined = 0;
+    selection->frequency_known = false;
+    selection->combined_frequency_ppb = 0.0;
+    selection->combined_skew_ppb = 0.0;
     for (index = 0; index < NTP_SELECT_MAX; index++)
     {
         selection->in_combined[index] = false;
@@ -160,25 +174,73 @@ void ntp_combine(const NtpCandidate *candidates, int count, NtpSelection *select
         return;
     }
     followed = &candidates[selection->selected];
+    // The limit runs from the least distance among those that could be
+    // combined, not the followed server's: the followed one is kept until
+    // another's distance is under half of its, so it may be the furthest,
+    // and a limit from it let every server in (2026-11-11). chronyd follows
+    // the least distance, so its limit from the selected one is the same.
+    best_us = followed->distance_us;
+    for (index = 0; index < count && index < NTP_SELECT_MAX; index++)
+    {
+        const NtpCandidate *c = &candidates[index];
+
+        if (selection->majority && selection->verdict[index] == NTP_VERDICT_CANDIDATE && !c->young &&
+            c->distance_us < best_us)
+        {
+            best_us = c->distance_us;
+        }
+    }
     for (index = 0; index < count && index < NTP_SELECT_MAX; index++)
     {
         const NtpCandidate *c = &candidates[index];
         double weight;
 
-        if (index != selection->selected &&
-            (!selection->majority || selection->verdict[index] != NTP_VERDICT_CANDIDATE ||
-             c->distance_us > NTP_COMBINE_LIMIT * followed->distance_us))
+        if (index != selection->selected)
         {
-            continue;
+            if (!selection->majority || selection->verdict[index] != NTP_VERDICT_CANDIDATE ||
+                c->young)
+            {
+                continue; // young: not combined yet, and no distant count either
+            }
+            if (c->distance_us > NTP_COMBINE_LIMIT * (double)(NTP_COMBINE_MARGIN_US + best_us) ||
+                (c->fitted && followed->fitted &&
+                 fabs(c->frequency_ppb - followed->frequency_ppb) >
+                     NTP_COMBINE_LIMIT * (c->skew_ppb + followed->skew_ppb)))
+            {
+                if (distant[index] < NTP_COMBINE_DISTANT)
+                {
+                    distant[index] = (uint8_t)(distant[index] + NTP_COMBINE_DISTANT_STEP);
+                }
+                continue;
+            }
+            if (distant[index] != 0)
+            {
+                distant[index]--;
+                continue;
+            }
         }
         weight = 1.0 / (double)(c->distance_us > 0 ? c->distance_us : 1);
         weights += weight;
         sum += weight * (double)(c->offset_us - followed->offset_us);
+        if (c->fitted && c->frequency_sd_ppb > 0.0 && c->skew_ppb > 0.0)
+        {
+            double frequency_weight = 1.0 / (c->frequency_sd_ppb * c->frequency_sd_ppb);
+
+            frequency_weights += frequency_weight;
+            frequency_sum += frequency_weight * c->frequency_ppb;
+            inverse_skews += 1.0 / (c->skew_ppb * c->skew_ppb);
+        }
         selection->in_combined[index] = true;
         selection->combined++;
     }
     // Relative to the followed server's offset, so the sum stays small.
     selection->combined_offset_us = followed->offset_us + (int64_t)llround(sum / weights);
+    if (frequency_weights > 0.0)
+    {
+        selection->frequency_known = true;
+        selection->combined_frequency_ppb = frequency_sum / frequency_weights;
+        selection->combined_skew_ppb = 1.0 / sqrt(inverse_skews);
+    }
 }
 
 

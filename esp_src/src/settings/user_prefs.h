@@ -27,10 +27,10 @@
 #define TELNET_PORT_DEFAULT    23
 
 // NTP: interval is the longest poll interval; the ESP polls more often
-// while its corrections are large (ntp.h). 512 s: the frequency window's
-// eight samples then span about an hour, long enough to measure the
-// crystal to a fraction of a ppm through a few ms of jitter, short enough
-// to follow its wander with temperature. Four servers at 512 s are a
+// while the crystal wanders (ntp.h). 512 s: a server's line of 16 samples
+// then spans about two hours, long enough to measure the crystal to a
+// fraction of a ppm through a few ms of jitter, short enough to follow its
+// wander with temperature. Four servers at 512 s are a
 // 48-byte request every 32 s on average. Server 1 is always set; 2 to 4
 // are optional (empty). The defaults, one per server, "" for none: three
 // independent sources, so that one going wrong is outvoted.
@@ -116,6 +116,37 @@ typedef union
 
 static_assert(sizeof(UserPrefs) == 652, "the stored layout must not change");
 
+// NTP: a correction added to every NTP sample's offset (UTC - local), us:
+// + moves the ESP's NTP clock later. For the ESP's own end of every path
+// (its network stack and the Wi-Fi hop): on a clock with GNSS, "ntp gnss"
+// measures it, about -100 us on the test LAN (NTP behind), set +100. The
+// same for every server; a path's own asymmetry it cannot fix. Stored under
+// its own key, so the layouts above do not change.
+#define NTP_ASYMMETRY_DEFAULT_US 0
+#define NTP_ASYMMETRY_MAX_US     10000
+
+// NTP: a correction for one server's path, as chronyd's "offset" on its
+// server line, us, added to that server's samples on top of ntp.asymmetry:
+// + moves the clock later while that server steers it. For a path known to
+// be asymmetric: a LAN server's next to none, an Internet one's hundreds of
+// us (a slow uplink's queue puts the clock ahead). Indexed by server
+// number, 0 DHCP's; a new host for a server clears its offset. Stored
+// under its own key.
+#define NTP_OFFSET_MAX_US 10000
+
+// NTP: the server DHCP offers (option 42, IPv4, the first only), as server
+// 0, polled before server 1: disabled, enabled (one server among the
+// others) or preferred (followed alone while it agrees with the others, as
+// chronyd's prefer). Enabled by default: a router's own NTP server is
+// usually the nearest there is. Stored under its own key.
+typedef enum
+{
+    NTP_DHCP_DISABLED = 0,
+    NTP_DHCP_ENABLED = 1,
+    NTP_DHCP_PREFERRED = 2,
+} NtpDhcpMode;
+#define NTP_DHCP_DEFAULT NTP_DHCP_ENABLED
+
 // NTP servers 2 to 4.
 typedef struct __attribute__((packed))
 {
@@ -125,6 +156,9 @@ typedef struct __attribute__((packed))
 
 extern UserPrefs user_prefs;
 extern UserPrefsNtp user_prefs_ntp;
+extern int32_t user_prefs_ntp_asymmetry_us;
+extern int32_t user_prefs_ntp_dhcp; // NtpDhcpMode
+extern int32_t user_prefs_ntp_offset_us[NTP_SERVERS + 1];
 
 // Loads, checks and repairs; saves if anything was repaired.
 void user_prefs_init(Stream *output);
@@ -137,6 +171,8 @@ void user_prefs_print(Stream *output);
 
 // Copies a string setting, NUL-terminated and truncated to fit.
 void user_prefs_set_string(char *field, const char *value);
+// "disable", "enable", "prefer": ntp.dhcp as the command takes it.
+const char *user_prefs_ntp_dhcp_name(int32_t mode);
 // NTP server index (0 to NTP_SERVERS - 1): server 1 is user_prefs' own.
 // Empty if not set.
 char *user_prefs_ntp_server(int index);

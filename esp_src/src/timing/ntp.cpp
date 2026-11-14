@@ -1,5 +1,7 @@
 #include "ntp.h"
 
+#include <stdarg.h>
+
 #include <Network.h>
 #include <esp_timer.h>
 #include <math.h>
@@ -7,21 +9,27 @@
 #include <sys/time.h>
 
 #include "../console/console.h"
+#include "../net/dhcp_ntp.h"
 #include "../net/net_connect.h"
 #include "../settings/user_prefs.h"
 #include "../util/time_text.h"
 #include "esp_clock.h"
 #include "ntp_client.h"
 #include "ntp_select.h"
+#include "ntp_stats.h"
 #include "pps.h"
 
 #define LEARN_FIRST_S     64U
 #define POLL_MIN_S        128U // adaptive range, once learnt: from here ...
 #define POLL_START_S      256U
-#define POLL_QUIET_US     500LL // ... longer after POLL_QUIET_RUN corrections under this
-#define POLL_QUIET_RUN    4U
-#define POLL_LOUD_US      2000LL // ... shorter after one over this
+#define POLL_TARGET       8U // samples in the followed server's line (chronyd's polltarget)
 #define RETRY_FIRST_S     60U
+// Server 0 is the one DHCP offers (ntp.dhcp), 1 to NTP_SERVERS those set.
+#define NTP_SLOTS  (NTP_SERVERS + 1)
+#define DHCP_SLOT  0
+#define DHCP_HOST  "dhcp"
+#define NTP_RESOLVE_FAILURES 2U     // failed polls in a row before resolving again
+#define NTP_REFRESH_S        604800U // and once a week
 #define SYNC_SLACK_S      300U
 #define FREE_RUN_AFTER_S  86400U
 #define PPS_SYNC_LIMIT_NS 1000000 // phase within which the edge marks its second
@@ -30,8 +38,6 @@
 // frequency would be learnt on one path and continued on another.
 #define IPV6_WAIT_MS 15000U
 #define FED_BY_OTHER (-2)
-// A server's samples kept, for its jitter.
-#define HISTORY 8
 // A server is usable while one of its last three polls was good ...
 #define REACH_RECENT 0x07U
 
@@ -45,20 +51,28 @@ typedef struct
     uint32_t retry_s;
     uint32_t learn_step; // 64, 128, 256 s polls done
     uint8_t reach;       // a bit per poll, the latest lowest: 1 = good
-    // This poll's addresses, preferred family first, and the one in use: a
-    // poll with no reply at all goes on to the next at once.
+    // The name's addresses, preferred family first, and the one in use: a
+    // poll with no reply at all goes on to the next at once. Resolved once
+    // and kept (see resolve_if_needed), so a pool or anycast name keeps its
+    // address, and its statistics, from poll to poll.
     IPAddress targets[NET_ADDRESSES];
     int target_count;
     int target;
+    int64_t resolved_us;   // when, 0 = never
+    uint8_t failures;      // polls in a row with no good sample
+    bool resolve;          // resolve again before the next poll
+    uint32_t resolves;
     char address[48]; // the address last polled
-    EspClockSample history[HISTORY];
-    uint8_t count;
-    uint8_t next;
+    char stats_address[48]; // the address its statistics are of
+    EspClockSample sample; // the latest good one
+    uint32_t count;        // good samples since reset
+    uint32_t restarts;     // its statistics started again: another address, or a jump
     int64_t measured_us;      // the latest sample against the clock when it came
     int64_t applied_local_us; // the latest sample given to the clock, if any
     NtpPollResult last;       // the latest poll, good or bad
     bool have_last;
-    // From the latest selection.
+    // From the latest selection: its line's offset now against the clock,
+    // its root distance and the samples' spread about the line.
     int64_t offset_us;
     int64_t distance_us;
     int64_t jitter_us;
@@ -71,17 +85,19 @@ typedef struct
 
 typedef struct
 {
-    NtpServer servers[NTP_SERVERS];
+    NtpServer servers[NTP_SLOTS];
     int peer;    // the server the clock follows, -1 if none
     int polling; // the server with a poll in flight, -1 if none
     int fed_by;  // the server whose samples the frequency window holds: -1 none
                  // yet, FED_BY_OTHER one since changed
     NtpSelection selection;
     uint32_t combined_updates; // clock updates from more than one server
+    uint8_t distant[NTP_SLOTS]; // ntp_combine()'s, chronyd's distant counts
+    uint8_t combined_mask;        // the servers combined last, reported on change
     bool disagree;           // reported: the usable servers have no majority
     uint32_t max_interval_s; // ntp.interval: the longest poll interval
     uint32_t interval_s;     // the interval in use, adaptive below that
-    uint32_t quiet;          // consecutive small corrections
+    double poll_score;       // chronyd's: the interval doubles at 1, halves below 0
     bool report_ready;
     SML_TIME_NTP_PAYLOAD report;
     uint32_t edges;
@@ -92,10 +108,25 @@ typedef struct
 } Ntp;
 
 static Ntp ntp;
+// Each server's samples and fitted line, apart from the rest (they are
+// large, and NtpServer is reset by assignment).
+static NtpStats server_stats[NTP_SLOTS];
 
 static int64_t now_us(void)
 {
     return esp_timer_get_time();
+}
+
+
+// What a slot is set to: "dhcp" for server 0 unless disabled, else server
+// index's name ("" if none).
+static const char *slot_host(int index)
+{
+    if (index == DHCP_SLOT)
+    {
+        return user_prefs_ntp_dhcp != NTP_DHCP_DISABLED ? DHCP_HOST : "";
+    }
+    return user_prefs_ntp_server(index - 1);
 }
 
 
@@ -104,11 +135,13 @@ static void reset_server(int index)
     NtpServer *server = &ntp.servers[index];
 
     *server = NtpServer(); // zeroed, with IPAddress constructed
-    snprintf(server->host, sizeof(server->host), "%s", user_prefs_ntp_server(index));
+    snprintf(server->host, sizeof(server->host), "%s", slot_host(index));
     server->configured = server->host[0] != '\0';
     server->due = true;
     server->retry_s = RETRY_FIRST_S;
     server->verdict = server->configured ? NTP_VERDICT_UNUSABLE : NTP_VERDICT_NONE;
+    ntp_stats_reset(&server_stats[index]);
+    ntp.distant[index] = 0;
     if (ntp.peer == index)
     {
         ntp.peer = -1;
@@ -127,7 +160,7 @@ void ntp_init(void)
     ntp.peer = -1;
     ntp.polling = -1;
     ntp.fed_by = -1;
-    for (int index = 0; index < NTP_SERVERS; index++)
+    for (int index = 0; index < NTP_SLOTS; index++)
     {
         reset_server(index);
     }
@@ -140,7 +173,7 @@ void ntp_init(void)
 // which would otherwise schedule the next for an interval on.
 void ntp_resync(void)
 {
-    for (int index = 0; index < NTP_SERVERS; index++)
+    for (int index = 0; index < NTP_SLOTS; index++)
     {
         ntp.servers[index].due = true;
         ntp.servers[index].resync = true;
@@ -159,6 +192,53 @@ static uint32_t update_age_s(void)
     int64_t age = now_us() - esp_clock_status()->last_update_local_us;
 
     return age < 0 ? 0 : (uint32_t)(age / 1000000);
+}
+
+
+bool ntp_set_asymmetry(int32_t us)
+{
+    int64_t delta = (int64_t)us - user_prefs_ntp_asymmetry_us;
+
+    if (us < -NTP_ASYMMETRY_MAX_US || us > NTP_ASYMMETRY_MAX_US)
+    {
+        return false;
+    }
+    user_prefs_ntp_asymmetry_us = us;
+    for (int index = 0; index < NTP_SLOTS; index++)
+    {
+        ntp_stats_shift(&server_stats[index], delta);
+        ntp.servers[index].sample.offset_us += delta;
+    }
+    // The clock's own window holds the old samples: start it again. The
+    // next update slews the clock by the change.
+    esp_clock_new_reference();
+    return true;
+}
+
+
+bool ntp_set_offset(int server, int32_t us)
+{
+    int64_t delta;
+
+    if (server < 0 || server >= NTP_SLOTS || us < -NTP_OFFSET_MAX_US || us > NTP_OFFSET_MAX_US)
+    {
+        return false;
+    }
+    delta = (int64_t)us - user_prefs_ntp_offset_us[server];
+    user_prefs_ntp_offset_us[server] = us;
+    if (delta != 0)
+    {
+        ntp_stats_shift(&server_stats[server], delta);
+        ntp.servers[server].sample.offset_us += delta;
+        esp_clock_new_reference(); // as for ntp.asymmetry
+    }
+    return true;
+}
+
+
+uint8_t ntp_servers_in_use(void)
+{
+    return ntp.peer >= 0 ? ntp.combined_mask : 0;
 }
 
 
@@ -211,40 +291,72 @@ static void set_system_time(void)
 
 
 /*
- * The poll interval adapts between POLL_MIN_S and ntp.interval: it doubles
- * after POLL_QUIET_RUN corrections in a row under POLL_QUIET_US, and halves
- * after one over POLL_LOUD_US. Short polls while the crystal wanders (warm
- * up, temperature) keep each correction small enough to slew gently; long
- * ones once it is steady spare the servers. Only the corrections from the
- * server followed count; every server is polled at the interval.
+ * The poll interval adapts between POLL_MIN_S and ntp.interval as chronyd
+ * adapts it (ntp_core.c), on each sample from the server followed:
+ *
+ *   - If the sample is further from the server's line than its own
+ *     distance (half the round trip), the line is not tracking it:
+ *     -log2(error / distance) is added to the score.
+ *   - Else the score moves by (samples in the line / POLL_TARGET - 1) /
+ *     POLL_TARGET, twice that when below the target. The runs test keeps
+ *     the line short while the crystal wanders, so the polls shorten; a
+ *     steady crystal lets it grow, and they lengthen.
+ *
+ * A score of 1 doubles the interval, one below 0 halves it. Every server
+ * is polled at the interval.
  */
-static void adapt_interval(int64_t error_us)
+static void adapt_interval(int64_t error_us, int64_t distance_us, unsigned samples)
 {
     uint32_t longest = ntp.max_interval_s;
     uint32_t shortest = POLL_MIN_S < longest ? POLL_MIN_S : longest;
+    uint32_t interval;
+    double adjust;
 
     if (error_us < 0)
     {
         error_us = -error_us;
     }
-    if (error_us > POLL_LOUD_US)
+    if (distance_us < 1)
     {
-        ntp.interval_s /= 2;
-        ntp.quiet = 0;
+        distance_us = 1;
     }
-    else if (error_us < POLL_QUIET_US && ++ntp.quiet >= POLL_QUIET_RUN)
+    if (error_us > distance_us)
     {
-        ntp.interval_s *= 2;
-        ntp.quiet = 0;
+        adjust = -log2((double)error_us / (double)distance_us);
     }
-    if (ntp.interval_s > longest)
+    else
     {
-        ntp.interval_s = longest;
+        adjust = ((double)samples / POLL_TARGET - 1.0) / POLL_TARGET;
+        if (samples < POLL_TARGET)
+        {
+            adjust *= 2.0;
+        }
     }
-    if (ntp.interval_s < shortest)
+    ntp.poll_score += adjust;
+    interval = ntp.interval_s;
+    while (ntp.poll_score >= 1.0)
     {
-        ntp.interval_s = shortest;
+        interval *= 2;
+        ntp.poll_score -= 1.0;
     }
+    while (ntp.poll_score < 0.0)
+    {
+        interval /= 2;
+        ntp.poll_score += 1.0;
+    }
+    // Held at the ends as chronyd holds them: at the shortest, the score
+    // from nothing; at the longest, one step from lengthening.
+    if (interval < shortest)
+    {
+        interval = shortest;
+        ntp.poll_score = 0.0;
+    }
+    else if (interval > longest)
+    {
+        interval = longest;
+        ntp.poll_score = 1.0;
+    }
+    ntp.interval_s = interval;
 }
 
 
@@ -320,9 +432,37 @@ static const char *poll_failure(const NtpPollResult *poll)
 
 // ---- Samples and selection -----------------------------------------------------
 
+/*
+ * An event to the console, led by the NTP clock's UTC time of day
+ * ("12:34:56Z NTP: following ..."), so a session log can be lined up with
+ * "ntp gnss -v"; "--:--:--Z" before the clock is set.
+ */
+static void ntp_event(const char *format, ...) __attribute__((format(printf, 1, 2)));
+static void ntp_event(const char *format, ...)
+{
+    char text[160];
+    va_list args;
+
+    va_start(args, format);
+    vsnprintf(text, sizeof(text), format, args);
+    va_end(args);
+    if (esp_clock_is_valid())
+    {
+        uint32_t day_s = (uint32_t)((uint64_t)(esp_clock_utc_us(now_us()) / 1000000) % 86400U);
+
+        console_printf("%02u:%02u:%02uZ NTP: %s", (unsigned)(day_s / 3600U),
+                       (unsigned)(day_s / 60U % 60U), (unsigned)(day_s % 60U), text);
+    }
+    else
+    {
+        console_printf("--:--:--Z NTP: %s", text);
+    }
+}
+
+
 static const EspClockSample *latest(const NtpServer *server)
 {
-    return &server->history[(server->next + HISTORY - 1) % HISTORY];
+    return &server->sample;
 }
 
 
@@ -334,79 +474,61 @@ static int64_t against_clock(const EspClockSample *sample)
 }
 
 
-/*
- * The spread of a server's recent samples: the standard deviation of their
- * raw offsets about a straight line through them, so that the ESP crystal's
- * frequency error (the line's slope) is not counted against the server.
- * 0 with fewer than three.
- */
-static int64_t jitter_us(const NtpServer *server)
+// The server's line (ntp_stats.h) run on to now, against the clock: its
+// view of our error now.
+static int64_t line_against_clock(int index, int64_t now)
 {
-    double sum_t = 0.0, sum_x = 0.0, sum_tt = 0.0, sum_tx = 0.0;
-    double t0 = (double)server->history[0].local_us;
-    double x0 = (double)server->history[0].offset_us;
-    double n = server->count;
-    double slope;
-    double intercept;
-    double squares = 0.0;
-    uint8_t index;
-
-    if (server->count < 3)
-    {
-        return 0;
-    }
-    for (index = 0; index < server->count; index++)
-    {
-        double t = (double)server->history[index].local_us - t0;
-        double x = (double)server->history[index].offset_us - x0;
-
-        sum_t += t;
-        sum_x += x;
-        sum_tt += t * t;
-        sum_tx += t * x;
-    }
-    if (n * sum_tt - sum_t * sum_t <= 0.0)
-    {
-        return 0;
-    }
-    slope = (n * sum_tx - sum_t * sum_x) / (n * sum_tt - sum_t * sum_t);
-    intercept = (sum_x - slope * sum_t) / n;
-    for (index = 0; index < server->count; index++)
-    {
-        double t = (double)server->history[index].local_us - t0;
-        double residual = (double)server->history[index].offset_us - x0 - (intercept + slope * t);
-
-        squares += residual * residual;
-    }
-    return (int64_t)sqrt(squares / (n - 2.0));
+    return now + ntp_stats_offset_at(&server_stats[index], now) - esp_clock_utc_us(now);
 }
 
 
 /*
- * Root distance, as NTP has it: how far the server's time can be from the
- * truth, seen from here. Half the round trip and half the server's own root
- * delay (the path's asymmetry could be all of it), its root dispersion, the
- * jitter of its samples, and the drift allowed since the latest.
+ * Root distance, as chronyd has it for selection: half the round trip and
+ * half the server's own root delay (the path's asymmetry could be all of
+ * it) and its root dispersion, of the sample that gives the least, the
+ * skew of the server's line over the time since that sample; and, as NTP
+ * adds its jitter, the samples' spread about the line.
  */
-static int64_t root_distance_us(const NtpServer *server, int64_t now)
+static int64_t root_distance_us(int index, int64_t now)
 {
-    const EspClockSample *sample = latest(server);
-    int64_t age = now - sample->local_us;
-    int64_t distance;
+    const NtpStats *stats = &server_stats[index];
+    int64_t distance = ntp_stats_distance_us(stats, now) + (int64_t)llround(stats->sd_us);
 
-    if (age < 0)
-    {
-        age = 0;
-    }
-    distance = sample->delay_us / 2 + (int64_t)sample->root_delay_us / 2 +
-               (int64_t)sample->root_dispersion_us + server->jitter_us +
-               age * esp_clock_drift_ppm() / 1000000;
     return distance > 0 ? distance : 1;
 }
 
 
-static bool usable(const NtpServer *server, int64_t now)
+/*
+ * What the followed server is chosen by: its root distance, but for a young
+ * line (fewer than NTP_STATS_MIN_SAMPLES) with the skew taken as at most
+ * ESP_CLOCK_DRIFT_YOUNG_PPB, as the drift allowance takes it. A line of 3-5
+ * samples has a skew of hundreds or thousands of ppm (Student's t at 1-3
+ * degrees of freedom), so its distance is mostly skew x time since its last
+ * poll, and whichever server was polled last looked closest: at power-on an
+ * Internet server 1.3 ms off was followed over the LAN one for minutes,
+ * and the clock took half an hour to come back. Capped, the choice goes by
+ * the round trip, the server's own error and the jitter, which are known
+ * from the first samples. The distance itself (agreement, combining) is
+ * not changed.
+ */
+static int64_t rank_distance_us(int index, int64_t now)
 {
+    const NtpStats *stats = &server_stats[index];
+    int64_t distance;
+
+    if (stats->samples >= NTP_STATS_MIN_SAMPLES)
+    {
+        return 0; // the root distance
+    }
+    distance = ntp_stats_distance_capped_us(stats, now, ESP_CLOCK_DRIFT_YOUNG_PPB) +
+               (int64_t)llround(stats->sd_us);
+    return distance > 0 ? distance : 1;
+}
+
+
+static bool reachable(int index, int64_t now)
+{
+    const NtpServer *server = &ntp.servers[index];
     int64_t limit_us = (2LL * ntp.max_interval_s + SYNC_SLACK_S) * 1000000;
 
     return server->configured && server->count != 0 && (server->reach & REACH_RECENT) != 0 &&
@@ -414,25 +536,54 @@ static bool usable(const NtpServer *server, int64_t now)
 }
 
 
-// The server's latest sample to the clock, unless it has had it. Its
-// offset is the servers' combined one when there is one (ntp_combine()):
-// the followed server's sample moved by the difference.
+/*
+ * A server can be selected once it has a line (three samples), as chronyd
+ * selects a source only once its regression is good: before that its
+ * distance is the worst case (2000 ppm of skew), growing 2 ms a second, so
+ * whichever had answered last looked best and the clock hopped between
+ * them for the first few minutes. Until any server has a line, the one
+ * that set the clock is kept (select_server).
+ */
+static bool usable(int index, int64_t now)
+{
+    return reachable(index, now) && server_stats[index].fitted;
+}
+
+
+/*
+ * The server's latest sample to the clock, unless it has had it, with the
+ * estimate to steer by: the servers' combined offset now (ntp_combine(),
+ * each server's line run on to now) and their combined frequency once
+ * there is a line. The first sample of all sets the clock by itself.
+ */
 static void apply(int index)
 {
     NtpServer *server = &ntp.servers[index];
-    EspClockSample combined = *latest(server);
-    const EspClockSample *sample = &combined;
+    const EspClockSample *sample = latest(server);
     const EspClockStatus *status = esp_clock_status();
+    EspClockEstimate estimate;
     EspClockAction action;
+    int64_t now = now_us();
+    bool estimated = esp_clock_is_valid() && ntp.selection.selected == index;
 
     if (server->count == 0 || server->applied_local_us == sample->local_us)
     {
         return;
     }
-    if (esp_clock_is_valid() && ntp.selection.selected == index && ntp.selection.combined > 1)
+    if (estimated)
     {
-        combined.offset_us += ntp.selection.combined_offset_us - server->offset_us;
-        ntp.combined_updates++;
+        // The combined offset is our error now: UTC - local is that plus
+        // the model's.
+        estimate.offset_us = ntp.selection.combined_offset_us + esp_clock_utc_us(now) - now;
+        estimate.frequency_known = ntp.selection.frequency_known;
+        estimate.frequency_ppb = (int32_t)llround(ntp.selection.combined_frequency_ppb);
+        estimate.skew_ppb = (int32_t)(ntp.selection.combined_skew_ppb < 1e9
+                                          ? llround(ntp.selection.combined_skew_ppb)
+                                          : 1000000000LL);
+        if (ntp.selection.combined > 1)
+        {
+            ntp.combined_updates++;
+        }
     }
     if (ntp.fed_by != index)
     {
@@ -445,16 +596,25 @@ static void apply(int index)
     server->applied_local_us = sample->local_us;
     // A gentle correction is spread over about two polls: the next sample
     // replaces what is left of it.
-    action = esp_clock_update(sample, now_us(), (int64_t)ntp.interval_s * 2000000);
+    action = esp_clock_update(sample, now, (int64_t)ntp.interval_s * 2000000,
+                              estimated ? &estimate : NULL);
     set_system_time();
     if (action == ESP_CLOCK_STEPPED)
     {
         char step[TIME_NS_TEXT];
         char name[SERVER_TEXT];
 
-        time_format_ns(step, status->last_error_us * 1000, true);
-        console_printf("NTP: clock set from %s, step %s (%u steps)\n", server_text(server, name),
-                       step, (unsigned)status->steps);
+        if (status->steps == 1)
+        {
+            // The first: nothing before it to have stepped from.
+            ntp_event("clock set from %s\n", server_text(server, name));
+        }
+        else
+        {
+            time_format_ns(step, status->last_correction_us * 1000, true);
+            ntp_event("clock stepped by %s from %s (%u steps)\n", step,
+                           server_text(server, name), (unsigned)status->steps);
+        }
         start_pps();
     }
     else if (action == ESP_CLOCK_SLEWED_FAST)
@@ -462,11 +622,7 @@ static void apply(int index)
         char slew[TIME_NS_TEXT];
 
         time_format_ns(slew, status->slew_us * 1000, true);
-        console_printf("NTP: correcting %s at %d ppm\n", slew, ESP_CLOCK_FAST_SLEW_PPM);
-    }
-    if (status->frequency_samples >= 2 && action != ESP_CLOCK_STEPPED)
-    {
-        adapt_interval(status->last_error_us);
+        ntp_event("correcting %s at %d ppm\n", slew, ESP_CLOCK_FAST_SLEW_PPM);
     }
 }
 
@@ -477,9 +633,12 @@ static void apply(int index)
  * server just polled. The first good sample of all sets the clock, there
  * being nothing to judge it against.
  */
+static void note_combined(void);
+
+
 static void select_server(int fresh)
 {
-    NtpCandidate candidates[NTP_SERVERS];
+    NtpCandidate candidates[NTP_SLOTS];
     int64_t now = now_us();
     int previous = ntp.peer;
     bool disagree;
@@ -494,24 +653,58 @@ static void select_server(int fresh)
         apply(fresh);
         previous = fresh;
     }
-    for (int index = 0; index < NTP_SERVERS; index++)
+    for (int index = 0; index < NTP_SLOTS; index++)
     {
         NtpServer *server = &ntp.servers[index];
 
+        const NtpStats *stats = &server_stats[index];
+
         candidates[index].configured = server->configured;
-        candidates[index].usable = usable(server, now);
+        candidates[index].usable = usable(index, now);
         if (server->count != 0)
         {
-            server->jitter_us = jitter_us(server);
-            server->offset_us = against_clock(latest(server));
-            server->distance_us = root_distance_us(server, now);
+            server->jitter_us = (int64_t)llround(stats->sd_us);
+            server->offset_us = line_against_clock(index, now);
+            server->distance_us = root_distance_us(index, now);
         }
         candidates[index].offset_us = server->offset_us;
         candidates[index].distance_us = server->distance_us;
+        candidates[index].rank_us = server->count != 0 ? rank_distance_us(index, now) : 0;
+        candidates[index].fitted = server->count != 0 && stats->fitted;
+        candidates[index].frequency_ppb = stats->frequency_ppb;
+        candidates[index].frequency_sd_ppb = stats->frequency_sd_ppb;
+        candidates[index].skew_ppb = stats->skew_ppb;
+        candidates[index].young = stats->samples < NTP_STATS_MIN_SAMPLES;
     }
-    ntp_select(candidates, NTP_SERVERS, ntp.peer, &ntp.selection);
-    ntp_combine(candidates, NTP_SERVERS, &ntp.selection);
-    for (int index = 0; index < NTP_SERVERS; index++)
+    ntp_select(candidates, NTP_SLOTS, ntp.peer, &ntp.selection);
+    if (ntp.selection.usable == 0 && previous >= 0 && reachable(previous, now))
+    {
+        // None has a line yet: stay with the server followed (the one that
+        // set the clock), steering by its samples alone.
+        ntp.selection.selected = previous;
+        ntp.selection.verdict[previous] = NTP_VERDICT_SELECTED;
+    }
+    if (user_prefs_ntp_dhcp == NTP_DHCP_PREFERRED &&
+        (ntp.selection.verdict[DHCP_SLOT] == NTP_VERDICT_CANDIDATE ||
+         ntp.selection.verdict[DHCP_SLOT] == NTP_VERDICT_SELECTED))
+    {
+        // DHCP's server preferred, as chronyd's prefer: followed while it
+        // agrees with the majority, and the others not combined with it
+        // (marked young for ntp_combine: left out, gaining no distant count).
+        if (ntp.selection.selected >= 0 && ntp.selection.selected != DHCP_SLOT)
+        {
+            ntp.selection.verdict[ntp.selection.selected] = NTP_VERDICT_CANDIDATE;
+        }
+        ntp.selection.selected = DHCP_SLOT;
+        ntp.selection.verdict[DHCP_SLOT] = NTP_VERDICT_SELECTED;
+        for (int index = 0; index < NTP_SLOTS; index++)
+        {
+            candidates[index].young = candidates[index].young || index != DHCP_SLOT;
+        }
+    }
+    ntp_combine(candidates, NTP_SLOTS, ntp.distant, &ntp.selection);
+    note_combined();
+    for (int index = 0; index < NTP_SLOTS; index++)
     {
         ntp.servers[index].verdict = ntp.selection.verdict[index];
     }
@@ -521,11 +714,11 @@ static void select_server(int fresh)
     {
         char name[SERVER_TEXT];
 
-        console_printf("NTP: following %s\n", server_text(&ntp.servers[ntp.peer], name));
+        ntp_event("following %s\n", server_text(&ntp.servers[ntp.peer], name));
     }
     else if (ntp.peer < 0 && previous >= 0)
     {
-        console_printf("NTP: no server usable, coasting\n");
+        ntp_event("no server usable, coasting\n");
     }
     if (ntp.peer >= 0)
     {
@@ -536,36 +729,135 @@ static void select_server(int fresh)
     if (disagree != ntp.disagree)
     {
         ntp.disagree = disagree;
-        console_printf(disagree ? "NTP: servers DISAGREE, no majority\n" : "NTP: servers agree\n");
+        ntp_event(disagree ? "servers DISAGREE, no majority\n" : "servers agree\n");
     }
+}
+
+
+// "NTP: combining 1, 2" (server numbers) when the set combined changes,
+// "NTP: combining 2 alone" when it falls to the followed server.
+static void note_combined(void)
+{
+    uint8_t mask = 0;
+
+    for (int index = 0; index < NTP_SLOTS; index++)
+    {
+        if (ntp.selection.in_combined[index])
+        {
+            mask = (uint8_t)(mask | (1U << index));
+        }
+    }
+    if (mask == ntp.combined_mask)
+    {
+        return;
+    }
+    ntp.combined_mask = mask;
+    if (mask == 0)
+    {
+        return;
+    }
+    if (ntp.selection.combined == 1)
+    {
+        ntp_event("combining %d alone\n", ntp.selection.selected);
+        return;
+    }
+    {
+        char list[4 * NTP_SLOTS] = "";
+        size_t used = 0;
+
+        for (int index = 0; index < NTP_SLOTS; index++)
+        {
+            if (mask & (1U << index))
+            {
+                used += (size_t)snprintf(list + used, sizeof(list) - used, "%s%d",
+                                         used != 0 ? ", " : "", index);
+            }
+        }
+        ntp_event("combining %s\n", list);
+    }
+}
+
+
+/*
+ * A good sample to the server's statistics. They start again for another
+ * address (another server behind the name, another path), or a sample off
+ * the server's line by more than a step (the server's time jumped): the
+ * old samples would hold the line, and the clock, where it was.
+ */
+// True with *off_line_us, the sample against the line before it, if it
+// joined a line.
+static bool add_to_stats(int index, const EspClockSample *sample, int64_t *off_line_us)
+{
+    NtpServer *server = &ntp.servers[index];
+    NtpStats *stats = &server_stats[index];
+    NtpStatsSample entry;
+    bool joined = false;
+
+    if (stats->samples != 0)
+    {
+        *off_line_us = sample->offset_us - ntp_stats_offset_at(stats, sample->local_us);
+        joined = stats->fitted;
+        if (strcmp(server->stats_address, server->address) != 0 ||
+            *off_line_us > ESP_CLOCK_STEP_US || *off_line_us < -ESP_CLOCK_STEP_US)
+        {
+            ntp_stats_reset(stats);
+            server->restarts++;
+            joined = false;
+        }
+    }
+    static_assert(sizeof(server->stats_address) == sizeof(server->address), "same size");
+    memcpy(server->stats_address, server->address, sizeof(server->stats_address));
+    entry.local_us = sample->local_us;
+    entry.offset_us = sample->offset_us;
+    entry.delay_us = sample->delay_us < 0 ? 0U : (uint32_t)sample->delay_us;
+    entry.server_us = sample->root_delay_us / 2U + sample->root_dispersion_us;
+    ntp_stats_add(stats, &entry);
+    return joined;
 }
 
 
 static void handle_poll(int index, const NtpPollResult *poll)
 {
     NtpServer *server = &ntp.servers[index];
+    int64_t off_line_us = 0;
+    EspClockSample sample;
+    bool joined;
 
     server->last = *poll;
     server->have_last = true;
     server->polls++;
     server->reach = (uint8_t)(server->reach << 1 | (poll->ok ? 1U : 0U));
+    if (!poll->ok && server->failures < UINT8_MAX)
+    {
+        server->failures++;
+    }
+    if (poll->ok)
+    {
+        server->failures = 0;
+    }
     if (!poll->ok)
     {
-        console_printf("NTP: poll of %s failed (%s %s)\n", server->host, poll_failure(poll),
+        ntp_event("poll of %s failed (%s %s)\n", server->host, poll_failure(poll),
                        poll->kiss);
         schedule_next(server, false);
         select_server(-1);
         return;
     }
     server->good_polls++;
-    server->measured_us = esp_clock_is_valid() ? against_clock(&poll->sample) : 0;
-    server->history[server->next] = poll->sample;
-    server->next = (uint8_t)((server->next + 1) % HISTORY);
-    if (server->count < HISTORY)
-    {
-        server->count++;
-    }
+    // ntp.asymmetry: the ESP's own end of every path; ntp offset: this
+    // server's path.
+    sample = poll->sample;
+    sample.offset_us += user_prefs_ntp_asymmetry_us + user_prefs_ntp_offset_us[index];
+    server->measured_us = esp_clock_is_valid() ? against_clock(&sample) : 0;
+    server->sample = sample;
+    server->count++;
+    joined = add_to_stats(index, &sample, &off_line_us);
     select_server(index);
+    if (joined && index == ntp.peer && esp_clock_status()->frequency_samples >= 2)
+    {
+        adapt_interval(off_line_us, sample.delay_us / 2 + (int64_t)NTP_STATS_PRECISION_US,
+                       server_stats[index].samples);
+    }
     schedule_next(server, true);
 }
 
@@ -669,10 +961,10 @@ static void check_settings(void)
             ntp.interval_s = ntp.max_interval_s;
         }
     }
-    for (int index = 0; index < NTP_SERVERS; index++)
+    for (int index = 0; index < NTP_SLOTS; index++)
     {
         if (index != ntp.polling &&
-            strcmp(ntp.servers[index].host, user_prefs_ntp_server(index)) != 0)
+            strcmp(ntp.servers[index].host, slot_host(index)) != 0)
         {
             reset_server(index);
             select_server(-1);
@@ -691,7 +983,7 @@ static void take_result(bool network_up)
         return;
     }
     server = &ntp.servers[ntp.polling];
-    if (strcmp(server->host, user_prefs_ntp_server(ntp.polling)) != 0)
+    if (strcmp(server->host, slot_host(ntp.polling)) != 0)
     {
         ntp.polling = -1; // changed while it was polled: check_settings resets it
         return;
@@ -707,12 +999,92 @@ static void take_result(bool network_up)
     {
         server->target++;
         server->fallbacks++;
-        console_printf("NTP: no reply from %s, trying %s\n", poll.address,
+        ntp_event("no reply from %s, trying %s\n", poll.address,
                        server->targets[server->target].toString().c_str());
         start_poll(index, &server->targets[server->target]);
         return;
     }
     handle_poll(index, &poll);
+}
+
+
+/*
+ * The server's addresses, resolved here in the loop task (ntp_client.h):
+ * both families, the preferred first (net_connect.h). Resolved once and
+ * kept, as chronyd keeps a source's address: a pool or anycast name gives
+ * another address almost every time, and each new address restarts the
+ * server's statistics, so a server resolved at every poll never had a line
+ * (uk.pool.ntp.org restarted 22 times in 23 polls). Resolved again only:
+ *
+ *   - with none yet, or after the network came back;
+ *   - after NTP_RESOLVE_FAILURES polls in a row without a good sample (the
+ *     address may have gone), taking the first address the name now gives;
+ *   - once every NTP_REFRESH_S, a week (chronyd's refresh is two weeks), staying
+ *     on the address in use if the name still gives it.
+ *
+ * If the name will not resolve but addresses are kept, they are polled.
+ * False only with no address at all.
+ */
+static bool resolve_if_needed(int index)
+{
+    NtpServer *server = &ntp.servers[index];
+    IPAddress fresh[NET_ADDRESSES];
+    IPAddress current;
+    int64_t now = now_us();
+    bool have = server->target_count > 0;
+    bool failing = server->failures >= NTP_RESOLVE_FAILURES;
+    bool stale = now - server->resolved_us >= (int64_t)NTP_REFRESH_S * 1000000;
+    int count;
+
+    if (index == DHCP_SLOT)
+    {
+        // DHCP's server: no lookup, but the latest lease's, read each poll
+        // (a new lease may offer another; its statistics then restart).
+        IPAddress offered;
+
+        if (!dhcp_ntp_server(&offered))
+        {
+            return have;
+        }
+        if (!have || !(server->targets[0] == offered))
+        {
+            server->targets[0] = offered;
+            server->target_count = 1;
+            server->target = 0;
+            server->resolves++;
+            server->resolved_us = now;
+        }
+        return true;
+    }
+    if (have && !server->resolve && !failing && !stale)
+    {
+        return true;
+    }
+    if (have)
+    {
+        current = server->targets[server->target];
+    }
+    count = net_resolve(server->host, fresh);
+    server->resolve = false;
+    if (count == 0)
+    {
+        server->dns_failures++;
+        return have; // the kept addresses, for now
+    }
+    server->resolves++;
+    server->resolved_us = now;
+    server->failures = failing ? 0 : server->failures;
+    server->target_count = count;
+    server->target = 0;
+    for (int i = 0; i < count; i++)
+    {
+        server->targets[i] = fresh[i];
+        if (have && !failing && fresh[i] == current)
+        {
+            server->target = i; // still given: stay on it
+        }
+    }
+    return true;
 }
 
 
@@ -722,13 +1094,22 @@ static int next_due(void)
     int64_t now = now_us();
     int chosen = -1;
 
-    for (int index = 0; index < NTP_SERVERS; index++)
+    for (int index = 0; index < NTP_SLOTS; index++)
     {
         const NtpServer *server = &ntp.servers[index];
 
         if (!server->configured || (!server->due && now < server->next_poll_us))
         {
             continue;
+        }
+        if (index == DHCP_SLOT && server->target_count == 0)
+        {
+            IPAddress offered;
+
+            if (!dhcp_ntp_server(&offered))
+            {
+                continue; // none offered (yet): nothing to poll
+            }
         }
         if (chosen < 0 || (server->due && !ntp.servers[chosen].due) ||
             (server->due == ntp.servers[chosen].due &&
@@ -752,9 +1133,10 @@ void ntp_service(bool network_up)
 
     if (!network_up)
     {
-        for (index = 0; index < NTP_SERVERS; index++)
+        for (index = 0; index < NTP_SLOTS; index++)
         {
-            ntp.servers[index].due = true; // poll as soon as it is back
+            ntp.servers[index].due = true;     // poll as soon as it is back,
+            ntp.servers[index].resolve = true; // the addresses may have changed
         }
         ntp.polled_on_link = false;
         ntp.network_was_up = false;
@@ -784,21 +1166,16 @@ void ntp_service(bool network_up)
     ntp.polled_on_link = true;
     server->due = false;
     server->resync = false;
-    // Resolved here, in the loop task (ntp_client.h): both families, the
-    // preferred first (net_connect.h).
-    server->target_count = net_resolve(server->host, server->targets);
-    server->target = 0;
-    if (server->target_count == 0)
+    if (!resolve_if_needed(index))
     {
         NtpPollResult failed;
 
         memset(&failed, 0, sizeof(failed));
         failed.dns_failed = true;
-        server->dns_failures++;
         handle_poll(index, &failed);
         return;
     }
-    start_poll(index, &server->targets[0]);
+    start_poll(index, &server->targets[server->target]);
 }
 
 
@@ -820,7 +1197,7 @@ static int configured_count(void)
 {
     int count = 0;
 
-    for (int index = 0; index < NTP_SERVERS; index++)
+    for (int index = 0; index < NTP_SLOTS; index++)
     {
         count += ntp.servers[index].configured ? 1 : 0;
     }
@@ -832,7 +1209,7 @@ static int verdict_count(NtpVerdict verdict)
 {
     int count = 0;
 
-    for (int index = 0; index < NTP_SERVERS; index++)
+    for (int index = 0; index < NTP_SLOTS; index++)
     {
         count += ntp.servers[index].verdict == verdict ? 1 : 0;
     }
@@ -936,7 +1313,7 @@ void ntp_print_sources(Stream *output, bool verbose)
         output->printf(" %10s %10s", "Delay", "Jitter");
     }
     output->printf("  Address\n");
-    for (int index = 0; index < NTP_SERVERS; index++)
+    for (int index = 0; index < NTP_SLOTS; index++)
     {
         const NtpServer *server = &ntp.servers[index];
         char age[TIME_AGE_TEXT];
@@ -945,13 +1322,13 @@ void ntp_print_sources(Stream *output, bool verbose)
         {
             if (verbose)
             {
-                output->printf("  %d -\n", index + 1);
+                output->printf("  %d -\n", index);
             }
             continue;
         }
         output->printf("%c %d %-24.24s",
                        ntp_verdict_marker(server->verdict, ntp.selection.in_combined[index]),
-                       index + 1,
+                       index,
                        server->host);
         if (server->count == 0)
         {
@@ -987,7 +1364,8 @@ void ntp_print_sources(Stream *output, bool verbose)
     {
         return;
     }
-    for (int index = 0; index < NTP_SERVERS; index++)
+    ntp_print_stats(output);
+    for (int index = 0; index < NTP_SLOTS; index++)
     {
         const NtpServer *server = &ntp.servers[index];
 
@@ -996,14 +1374,57 @@ void ntp_print_sources(Stream *output, bool verbose)
             continue;
         }
         output->printf("  %d: %lu polls (%lu good), %lu to the other address family, "
-                       "%lu DNS failures",
-                       index + 1, (unsigned long)server->polls, (unsigned long)server->good_polls,
-                       (unsigned long)server->fallbacks, (unsigned long)server->dns_failures);
+                       "resolved %lu times, %lu DNS failures, statistics restarted %lu times",
+                       index, (unsigned long)server->polls, (unsigned long)server->good_polls,
+                       (unsigned long)server->fallbacks, (unsigned long)server->resolves,
+                       (unsigned long)server->dns_failures, (unsigned long)server->restarts);
         if (server->have_last && !server->last.ok)
         {
-            output->printf("; last poll failed (%s %s)", poll_failure(&server->last),
-                           server->last.kiss);
+            output->printf("; last poll failed (%s%s%s)", poll_failure(&server->last),
+                           server->last.kiss[0] != '\0' ? " " : "", server->last.kiss);
         }
+        output->printf("\n");
+    }
+}
+
+
+/*
+ * Like chronyc sourcestats: each server's line. Kept: samples in the line,
+ * Runs: the runs among their residuals, Span: from the oldest in the line
+ * to the latest, Freq: the line's slope as the ESP's frequency error
+ * (+ = fast), Skew: its bound, Offset: the line now against the clock,
+ * SD: the samples' spread about the line.
+ */
+void ntp_print_stats(Stream *output)
+{
+    int64_t now = now_us();
+
+    output->printf("  # %-24s %4s %4s %6s %10s %10s %10s %10s\n", "Server", "Kept", "Runs", "Span",
+                   "Freq ppm", "Skew ppm", "Offset", "SD");
+    for (int index = 0; index < NTP_SLOTS; index++)
+    {
+        const NtpServer *server = &ntp.servers[index];
+        const NtpStats *stats = &server_stats[index];
+        char span[TIME_AGE_TEXT];
+
+        if (!server->configured || stats->samples == 0)
+        {
+            continue;
+        }
+        time_format_age(span, (uint32_t)(ntp_stats_span_us(stats) / 1000000));
+        output->printf("  %d %-24.24s %4u %4u %6s", index, server->host, stats->samples,
+                       stats->runs, span);
+        if (stats->fitted)
+        {
+            output->printf(" %+10.3f %10.3f", -stats->frequency_ppb / 1000.0,
+                           stats->skew_ppb / 1000.0);
+        }
+        else
+        {
+            output->printf(" %10s %10s", "-", "-");
+        }
+        print_us(output, esp_clock_is_valid() ? line_against_clock(index, now) : 0, true);
+        print_us(output, stats->fitted ? (int64_t)llround(stats->sd_us) : 0, false);
         output->printf("\n");
     }
 }
@@ -1019,7 +1440,7 @@ void ntp_print_tracking(Stream *output)
     {
         char name[SERVER_TEXT];
 
-        output->printf("%d %s, stratum %u", ntp.peer + 1, server_text(&ntp.servers[ntp.peer], name),
+        output->printf("%d %s, stratum %u", ntp.peer, server_text(&ntp.servers[ntp.peer], name),
                        status->last.stratum);
     }
     else
@@ -1045,17 +1466,32 @@ void ntp_print_tracking(Stream *output)
     time_print_utc(output, (uint32_t)(esp_clock_utc_us(status->last_update_local_us) / 1000000));
     output->printf(", ");
     time_print_duration(output, update_age_s());
-    output->printf(" ago\nLast:      correction ");
+    output->printf(" ago\nLast:      sample ");
     time_print_ns(output, status->last_error_us * 1000);
+    output->printf(", correction ");
+    time_print_ns(output, status->last_correction_us * 1000);
     output->printf(", round trip ");
     time_print_ns(output, status->last.delay_us * 1000);
     output->printf("\nRoot:      delay ");
     time_print_ns(output, (int64_t)status->last.root_delay_us * 1000);
     output->printf(", dispersion ");
     time_print_ns(output, (int64_t)status->last.root_dispersion_us * 1000);
-    output->printf("\nFrequency: %+.3f ppm (%lu estimates, latest from %u samples)\n",
-                   -(float)status->frequency_ppb / 1000.0f,
-                   (unsigned long)status->frequency_samples, status->frequency_used);
+    output->printf("\nFrequency: %+.3f ppm", -(float)status->frequency_ppb / 1000.0f);
+    if (status->skew_ppb >= 0)
+    {
+        output->printf(", skew %.3f (%lu estimates, the servers' lines)",
+                       (float)status->skew_ppb / 1000.0f, (unsigned long)status->frequency_samples);
+    }
+    else
+    {
+        if (status->frequency_samples != 0 && status->frequency_error_ppb >= 0)
+        {
+            output->printf(" +/- %.3f", (float)status->frequency_error_ppb / 1000.0f);
+        }
+        output->printf(" (%lu estimates, latest from %u samples)",
+                       (unsigned long)status->frequency_samples, status->frequency_used);
+    }
+    output->printf("; drift allowed %.2f ppm\n", (float)esp_clock_drift_ppb() / 1000.0f);
     output->printf("Slewing:   ");
     time_print_ns(output, status->slew_us * 1000);
     if (now_us() < status->slew_end_us)
@@ -1070,6 +1506,16 @@ void ntp_print_tracking(Stream *output)
     output->printf(" (%lu fast)\n", (unsigned long)status->fast_slews);
     output->printf("Interval:  %lu s (adaptive, at most %lu s)\n", (unsigned long)ntp.interval_s,
                    (unsigned long)ntp.max_interval_s);
+    // The corrections set by hand: ntp asymmetry, then each ntp server offset.
+    output->printf("Asymmetry: %+ld us", (long)user_prefs_ntp_asymmetry_us);
+    for (int server = 0; server < NTP_SLOTS; server++)
+    {
+        if (user_prefs_ntp_offset_us[server] != 0)
+        {
+            output->printf(", server %d %+ld us", server, (long)user_prefs_ntp_offset_us[server]);
+        }
+    }
+    output->printf(" (+ = clock later)\n");
 }
 
 

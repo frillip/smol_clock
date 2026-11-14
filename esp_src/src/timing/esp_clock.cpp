@@ -1,5 +1,6 @@
 #include "esp_clock.h"
 
+#include <math.h>
 #include <string.h>
 
 // After a step, the edge is reported as correcting for this long.
@@ -10,6 +11,7 @@ typedef struct
     int64_t local_us;
     int64_t offset_us;
     int64_t delay_us;
+    int64_t server_us; // root delay / 2 + root dispersion
 } RawSample;
 
 typedef struct
@@ -36,6 +38,8 @@ static int64_t magnitude(int64_t value)
 void esp_clock_init(void)
 {
     memset(&clock_state, 0, sizeof(clock_state));
+    clock_state.status.skew_ppb = -1;
+    clock_state.status.frequency_error_ppb = -1;
 }
 
 
@@ -95,6 +99,7 @@ static void remember(const EspClockSample *sample)
     slot->local_us = sample->local_us;
     slot->offset_us = sample->offset_us;
     slot->delay_us = sample->delay_us;
+    slot->server_us = (int64_t)sample->root_delay_us / 2 + (int64_t)sample->root_dispersion_us;
     clock_state.window_next = (uint8_t)((clock_state.window_next + 1) % ESP_CLOCK_WINDOW);
     if (clock_state.window_count < ESP_CLOCK_WINDOW)
     {
@@ -110,7 +115,7 @@ static void remember(const EspClockSample *sample)
  * adds delay on one side, so the slower exchanges carry the most asymmetry.
  * True with *ppb set if the samples span enough time.
  */
-static bool estimate_frequency(int64_t now_us, int64_t *ppb, uint8_t *used)
+static bool estimate_frequency(int64_t now_us, int64_t *ppb, int64_t *error_ppb, uint8_t *used)
 {
     int64_t best_delay = INT64_MAX;
     int64_t limit;
@@ -168,7 +173,32 @@ static bool estimate_frequency(int64_t now_us, int64_t *ppb, uint8_t *used)
     }
     n = (double)count;
     // Slope in us per us, as ppb.
-    *ppb = (int64_t)((n * sum_tx - sum_t * sum_x) / (n * sum_tt - sum_t * sum_t) * 1e9);
+    {
+        double slope = (n * sum_tx - sum_t * sum_x) / (n * sum_tt - sum_t * sum_t);
+        double intercept = (sum_x - slope * sum_t) / n;
+        double spread = sum_tt - sum_t * sum_t / n; // sum of (t - mean)^2
+        double squares = 0.0;
+
+        // Its standard error, from the residuals about the line: -1 (not
+        // known) with only two samples.
+        for (index = 0; index < clock_state.window_count && count > 2; index++)
+        {
+            const RawSample *raw = &clock_state.window[index];
+            double residual;
+
+            if (now_us - raw->local_us > ESP_CLOCK_WINDOW_MAX_US || raw->delay_us > limit)
+            {
+                continue;
+            }
+            residual = ((double)raw->offset_us - x0) -
+                       (intercept + slope * ((double)raw->local_us - t0));
+            squares += residual * residual;
+        }
+        *ppb = (int64_t)(slope * 1e9);
+        *error_ppb = count > 2 && spread > 0.0
+                         ? (int64_t)(sqrt(squares / (n - 2.0) / spread) * 1e9)
+                         : -1;
+    }
     *used = count;
     return true;
 }
@@ -176,12 +206,12 @@ static bool estimate_frequency(int64_t now_us, int64_t *ppb, uint8_t *used)
 
 // ---- Updates ----------------------------------------------------------------
 
-static void step(const EspClockSample *sample, int64_t now_us)
+static void step(int64_t offset_us, int64_t now_us)
 {
-    // The sample's offset holds at now as well, to within the frequency
-    // error over the few seconds since: negligible next to a step.
+    // The offset holds at now as well, to within the frequency error over
+    // the few seconds since the sample: negligible next to a step.
     clock_state.anchor_local_us = now_us;
-    clock_state.anchor_utc_us = now_us + sample->offset_us;
+    clock_state.anchor_utc_us = now_us + offset_us;
     clock_state.status.slew_us = 0;
     clock_state.status.slew_end_us = now_us;
     clock_state.status.fast = false;
@@ -191,22 +221,38 @@ static void step(const EspClockSample *sample, int64_t now_us)
 }
 
 
+static int64_t clamp_frequency(int64_t ppb)
+{
+    if (ppb > ESP_CLOCK_FREQUENCY_MAX_PPB)
+    {
+        return ESP_CLOCK_FREQUENCY_MAX_PPB;
+    }
+    if (ppb < -ESP_CLOCK_FREQUENCY_MAX_PPB)
+    {
+        return -ESP_CLOCK_FREQUENCY_MAX_PPB;
+    }
+    return ppb;
+}
+
+
 EspClockAction esp_clock_update(const EspClockSample *sample, int64_t now_us,
-                                int64_t time_constant_us)
+                                int64_t time_constant_us, const EspClockEstimate *estimate)
 {
     EspClockStatus *status = &clock_state.status;
-    int64_t predicted;
     int64_t error;
     int64_t old_ppb = status->frequency_ppb;
     int64_t new_ppb = old_ppb;
     int64_t utc_now;
     int64_t correction;
     int64_t duration;
+    int64_t error_ppb = 0;
     uint8_t used = 0;
+    int64_t target = estimate != NULL ? estimate->offset_us : sample->offset_us;
 
     status->updates++;
     status->last = *sample;
     status->last_update_local_us = sample->local_us;
+    status->estimated = estimate != NULL;
     remember(sample);
     if (now_us < sample->local_us)
     {
@@ -215,45 +261,64 @@ EspClockAction esp_clock_update(const EspClockSample *sample, int64_t now_us,
     if (!status->valid)
     {
         status->last_error_us = 0;
-        step(sample, now_us);
+        status->last_correction_us = 0;
+        step(target, now_us);
         return ESP_CLOCK_STEPPED;
     }
 
-    predicted = esp_clock_utc_us(sample->local_us);
-    error = sample->local_us + sample->offset_us - predicted;
+    error = sample->local_us + sample->offset_us - esp_clock_utc_us(sample->local_us);
     status->last_error_us = error;
-    if (magnitude(error) > ESP_CLOCK_STEP_US)
+    utc_now = esp_clock_utc_us(now_us);
+    if (estimate != NULL)
     {
-        step(sample, now_us);
+        // The estimate is for now: what is wrong at now, whatever the old
+        // slew and frequency did.
+        correction = now_us + estimate->offset_us - utc_now;
+    }
+    else
+    {
+        correction = error;
+    }
+    if (magnitude(correction) > ESP_CLOCK_STEP_US)
+    {
+        status->last_correction_us = correction;
+        step(target, now_us);
         return ESP_CLOCK_STEPPED;
     }
 
-    if (estimate_frequency(now_us, &new_ppb, &used))
+    if (estimate != NULL && estimate->frequency_known)
     {
-        if (new_ppb > ESP_CLOCK_FREQUENCY_MAX_PPB)
-        {
-            new_ppb = ESP_CLOCK_FREQUENCY_MAX_PPB;
-        }
-        else if (new_ppb < -ESP_CLOCK_FREQUENCY_MAX_PPB)
-        {
-            new_ppb = -ESP_CLOCK_FREQUENCY_MAX_PPB;
-        }
+        new_ppb = clamp_frequency(estimate->frequency_ppb);
+        status->skew_ppb = estimate->skew_ppb < 0 ? 0 : estimate->skew_ppb;
+        status->frequency_error_ppb = -1;
+        status->frequency_samples++;
+        status->frequency_used = 0;
+    }
+    else if (estimate_frequency(now_us, &new_ppb, &error_ppb, &used))
+    {
+        status->skew_ppb = -1;
+        status->frequency_error_ppb = (int32_t)(error_ppb < INT32_MAX ? error_ppb : INT32_MAX);
+        new_ppb = clamp_frequency(new_ppb);
         status->frequency_samples++;
         status->frequency_used = used;
     }
 
     /*
-     * Re-anchor where the model stands now, so the clock does not jump.
-     * What is still wrong at now: the error at the sample, less what the
-     * old slew has applied since the sample, plus the old frequency's error
-     * since the sample (taking the new estimate as the truth).
+     * Without an estimate, what is still wrong at now: the error at the
+     * sample, less what the old slew has applied since the sample, plus the
+     * old frequency's error since the sample (taking the new estimate as the
+     * truth).
      */
-    utc_now = esp_clock_utc_us(now_us);
-    correction = error - (slewed(now_us) - slewed(sample->local_us)) +
-                 (now_us - sample->local_us) * (new_ppb - old_ppb) / 1000000000LL;
+    if (estimate == NULL)
+    {
+        correction = error - (slewed(now_us) - slewed(sample->local_us)) +
+                     (now_us - sample->local_us) * (new_ppb - old_ppb) / 1000000000LL;
+    }
+    // Re-anchor where the model stands now, so the clock does not jump.
     clock_state.anchor_local_us = now_us;
     clock_state.anchor_utc_us = utc_now;
     status->frequency_ppb = (int32_t)new_ppb;
+    status->last_correction_us = correction;
 
     status->slew_us = correction;
     clock_state.slew_start_us = now_us;
@@ -281,11 +346,28 @@ EspClockAction esp_clock_update(const EspClockSample *sample, int64_t now_us,
 }
 
 
-int64_t esp_clock_drift_ppm(void)
+int64_t esp_clock_drift_ppb(void)
 {
     const EspClockStatus *status = &clock_state.status;
+    int64_t ppb;
 
-    return status->frequency_samples >= 2 ? 2 : status->frequency_samples == 1 ? 5 : 50;
+    if (status->frequency_samples == 0)
+    {
+        return 50000;
+    }
+    if (status->skew_ppb >= 0)
+    {
+        // A young line's skew is large (Student's t on one or two degrees
+        // of freedom): believed up to the 5 ppm of a first estimate.
+        ppb = (int64_t)status->skew_ppb + ESP_CLOCK_DRIFT_FLOOR_PPB;
+        return ppb > ESP_CLOCK_DRIFT_YOUNG_PPB ? ESP_CLOCK_DRIFT_YOUNG_PPB : ppb;
+    }
+    if (status->frequency_samples == 1 || status->frequency_error_ppb < 0)
+    {
+        return 5000;
+    }
+    ppb = 3LL * status->frequency_error_ppb + ESP_CLOCK_DRIFT_FLOOR_PPB;
+    return ppb > ESP_CLOCK_DRIFT_MAX_PPB ? ESP_CLOCK_DRIFT_MAX_PPB : ppb;
 }
 
 
@@ -296,24 +378,57 @@ void esp_clock_new_reference(void)
 }
 
 
+/*
+ * What one sample bounds the clock's error at local_us to, ns: the model
+ * at the sample's time, moved on by the slew applied by local_us, against
+ * the sample's offset; half its round trip and the server's share, as the
+ * truth could be anywhere in them; and the drift since.
+ */
+static int64_t bound_from(const RawSample *raw, int64_t local_us, int64_t drift_ppb)
+{
+    int64_t age = local_us - raw->local_us;
+    int64_t deviation = esp_clock_utc_us(raw->local_us) + slewed(local_us) - slewed(raw->local_us) -
+                        (raw->local_us + raw->offset_us);
+
+    if (age < 0)
+    {
+        age = 0;
+    }
+    return magnitude(deviation) * 1000 + magnitude(raw->delay_us) * 500 + raw->server_us * 1000 +
+           age * drift_ppb / 1000000;
+}
+
+
 uint32_t esp_clock_uncertainty_ns(int64_t local_us)
 {
     const EspClockStatus *status = &clock_state.status;
-    int64_t age = local_us - status->last_update_local_us;
-    int64_t ppm = esp_clock_drift_ppm();
-    int64_t ns;
+    int64_t drift_ppb = esp_clock_drift_ppb();
+    int64_t ns = INT64_MAX;
+    uint8_t index;
 
     if (!status->valid)
     {
         return UINT32_MAX;
     }
-    if (age < 0)
+    for (index = 0; index < clock_state.window_count; index++)
     {
-        age = 0;
+        int64_t bound = bound_from(&clock_state.window[index], local_us, drift_ppb);
+
+        ns = bound < ns ? bound : ns;
     }
-    ns = magnitude(status->last.delay_us) * 500 + (int64_t)status->last.root_delay_us * 500 +
-         (int64_t)status->last.root_dispersion_us * 1000 +
-         magnitude(status->slew_us - slewed(local_us)) * 1000 + age * ppm / 1000;
+    if (ns == INT64_MAX)
+    {
+        // No window (just started again on another server): the latest
+        // sample, as the window would hold it.
+        RawSample latest;
+
+        latest.local_us = status->last.local_us;
+        latest.offset_us = status->last.offset_us;
+        latest.delay_us = status->last.delay_us;
+        latest.server_us =
+            (int64_t)status->last.root_delay_us / 2 + (int64_t)status->last.root_dispersion_us;
+        ns = bound_from(&latest, local_us, drift_ppb);
+    }
     return ns > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)ns;
 }
 

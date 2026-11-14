@@ -29,6 +29,7 @@
 #include "src/pic/pic_link.h"
 #include "src/settings/user_prefs.h"
 #include "src/timing/ntp.h"
+#include "src/timing/ntp_gnss.h"
 #include "src/timing/pps.h"
 #include "src/tz/leap.h"
 #include "src/tz/tzinfo.h"
@@ -90,6 +91,7 @@ void loop()
     bool network_up;
 
     pic_link_service();
+    ntp_gnss_service();
     pic_boot_service();
     wifi_link_service();
     network_up = wifi_link_is_up();
