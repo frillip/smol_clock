@@ -3,6 +3,8 @@
 
   sync_common.py           copy every original over its copy, where they differ
   sync_common.py --check   change nothing; exit 1, listing them, if any differ
+  sync_common.py --fix     as with no option, then any copy git holds as a
+                           symbolic link staged again as a plain file
 
 The Arduino build compiles only what is inside the sketch, so the ESP keeps
 copies of the SML codec and the bootloader's layout from common/, and the
@@ -10,6 +12,14 @@ helper sketches in etc/ a copy of the ESP's partition table. They are plain
 files, not symbolic links, so a checkout works anywhere (Windows included)
 without special settings. Edit the originals, then run this; the ESP's host
 tests run --check, so a copy left behind fails them.
+
+A copy git still holds as a symbolic link (mode 120000) is reported. On
+Windows, with core.symlinks false, git keeps that mode whenever such a file
+is added again (after a reset, or by a tool that rebuilds what is staged),
+storing the file's contents as the link's target. --fix stages it again as
+a plain file (git rm --cached, then git add): commit that straight away,
+with nothing in between that rebuilds the index. It only stages: nothing
+is committed.
 """
 import argparse
 import filecmp
@@ -50,10 +60,31 @@ def stored_as_links(copies):
             if line.startswith("120000 ")]
 
 
+def git(arguments):
+    subprocess.run(["git"] + arguments, cwd=ROOT, check=True)
+
+
+def fix_links(links):
+    """Each one staged again as a plain file; the ones still links after."""
+    for copy in links:
+        try:
+            git(["rm", "--cached", "--quiet", "--", copy])
+            git(["add", "--", copy])
+        except (OSError, subprocess.CalledProcessError) as error:
+            print("sync_common: %s: %s" % (copy, error), file=sys.stderr)
+            continue
+        print("%s staged as a plain file" % copy)
+    return stored_as_links(links)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--check", action="store_true", help="report copies that differ, change nothing")
+    parser.add_argument("--fix", action="store_true",
+                        help="also stage copies git holds as symbolic links again as plain files")
     args = parser.parse_args(argv)
+    if args.check and args.fix:
+        parser.error("--check changes nothing: not with --fix")
     stale = []
     for original, copy in COPIES:
         source = os.path.join(ROOT, original)
@@ -67,9 +98,15 @@ def main(argv=None):
             shutil.copyfile(source, target)
             print("%s <- %s" % (copy, original))
     links = stored_as_links([copy for _, copy in COPIES])
+    if args.fix and links:
+        fixed = len(links)
+        links = fix_links(links)
+        if not links:
+            print("sync_common: %d staged as plain files: commit them now, on their own "
+                  "(git commit), and check with git show --raw HEAD (:120000 100644)" % fixed)
     for copy in links:
         print("sync_common: %s is in git as a symbolic link, not a file: "
-              "git rm --cached %s && git add %s" % (copy, copy, copy), file=sys.stderr)
+              "tools/sync_common.py --fix" % copy, file=sys.stderr)
     if args.check and stale:
         for copy in stale:
             print("sync_common: %s differs from its original: run tools/sync_common.py" % copy,
