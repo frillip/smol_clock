@@ -13,7 +13,10 @@
  * or else one second on, corrected for frequency. So a busy loop (an HTTP
  * request, an OTA check) does not lose a second; it only delays corrections.
  * The edge time recorded is esp_timer read in the interrupt just after the
- * pin is set, so interrupt latency is measured, not hidden.
+ * pin is set, so interrupt latency is measured, not hidden. The rising edge
+ * is armed early by the average latency (lead_us), so the pin rises on the
+ * second rather than 4-6 us after it; latency_us is still measured against
+ * the alarm.
  */
 #ifndef PPS_H
 #define PPS_H
@@ -36,6 +39,7 @@ typedef struct
     uint32_t late_plans;   // plans already in the past, skipped a second
     int32_t latency_us;    // latest edge: recorded time minus the alarm time
     int32_t latency_max_us;
+    int32_t lead_us;       // how early the rising edge is armed
 } PpsOutputStats;
 
 void pps_init(void);

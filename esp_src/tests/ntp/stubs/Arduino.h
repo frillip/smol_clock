@@ -6,6 +6,24 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+// strlcpy, as the ESP's newlib has it: glibc only from 2.38 (Ubuntu 24.04);
+// older ones (Ubuntu 22.04, a common WSL) lack it.
+#if defined(__GLIBC__) && (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 38))
+static inline size_t strlcpy(char *destination, const char *source, size_t size)
+{
+    size_t length = strlen(source);
+
+    if (size != 0)
+    {
+        size_t copied = length < size - 1 ? length : size - 1;
+
+        memcpy(destination, source, copied);
+        destination[copied] = '\0';
+    }
+    return length;
+}
+#endif
 #include <string>
 
 class Stream

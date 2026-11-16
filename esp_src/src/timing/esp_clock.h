@@ -35,11 +35,17 @@
  * sample's time and on by what is still being slewed in, is from the
  * sample, plus half its round trip, the server's root delay / 2 and root
  * dispersion, and a drift allowance for the time since. The drift allowance
- * is 50 ppm until the frequency is known, 5 ppm after one estimate, then
- * the estimate's skew (or three times the window's standard error of the
- * frequency) plus ESP_CLOCK_DRIFT_FLOOR_PPB (the crystal's wander with
- * temperature), at most ESP_CLOCK_DRIFT_MAX_PPB (ESP_CLOCK_DRIFT_YOUNG_PPB for
- * the skew, large while the lines are young).
+ * is 50 ppm until the frequency is known, ESP_CLOCK_DRIFT_YOUNG_PPB after
+ * one estimate, then the estimate's skew (or three times the window's
+ * standard error of the frequency) plus ESP_CLOCK_DRIFT_FLOOR_PPB (the
+ * crystal's wander with temperature), at most ESP_CLOCK_DRIFT_MAX_PPB
+ * (ESP_CLOCK_DRIFT_YOUNG_PPB for the skew, large while the lines are
+ * young). That cap is the crystal's own tolerance (the ESP32 needs one
+ * within 10 ppm, and temperature adds as much): a frequency from two or
+ * three samples a minute or two apart can be that far off when one
+ * exchange met a Wi-Fi burst (1 ms one way in 64 s is 15 ppm), and a
+ * smaller cap (5 ppm until 2026-11-15) let the bound grow too slowly
+ * between the first polls.
  */
 #ifndef ESP_CLOCK_H
 #define ESP_CLOCK_H
@@ -57,7 +63,11 @@
 #define ESP_CLOCK_FREQUENCY_MAX_PPB 500000
 #define ESP_CLOCK_DRIFT_FLOOR_PPB   500
 #define ESP_CLOCK_DRIFT_MAX_PPB     2000
-#define ESP_CLOCK_DRIFT_YOUNG_PPB   5000 // the cap on the lines' skew + floor
+#define ESP_CLOCK_DRIFT_YOUNG_PPB   20000 // the cap on the lines' skew + floor
+// A window fit of fewer samples is young too: its 3 x standard error + floor
+// capped at ESP_CLOCK_DRIFT_YOUNG_PPB, not ESP_CLOCK_DRIFT_MAX_PPB. As
+// NTP_STATS_MIN_SAMPLES (ntp.cpp checks they agree).
+#define ESP_CLOCK_YOUNG_SAMPLES     6
 
 typedef struct
 {
@@ -97,6 +107,7 @@ typedef struct
     int32_t frequency_error_ppb;  // the latest estimate's standard error, -1 if not known
     int32_t skew_ppb;             // the caller's bound on it, -1 if none
     int64_t last_update_local_us; // local time of the latest sample
+    int64_t last_update_utc_us;   // ... and UTC then, as that sample measured it
     int64_t last_error_us;        // that sample against the model before it
     int64_t last_correction_us;   // what that update corrected at the time of it
     bool estimated;               // the latest update was given an estimate
@@ -132,6 +143,8 @@ int64_t esp_clock_drift_ppb(void);
 // the window starts again, as raw offsets from two servers differ by their
 // paths' asymmetry and would read as a frequency error.
 void esp_clock_new_reference(void);
+// The samples the frequency window and the bound are taken from now.
+uint8_t esp_clock_window_samples(void);
 
 const EspClockStatus *esp_clock_status(void);
 

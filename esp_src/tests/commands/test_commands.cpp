@@ -8,6 +8,7 @@
 #include <Arduino.h>
 #include <esp_system.h>
 
+#include "../../src/util/loop_timing.h"
 #include "../../src/console/commands.h"
 #include "../../src/net/telnet.h"
 #include "../../src/net/telnet_auth.h"
@@ -960,6 +961,26 @@ static void test_esp(void)
     prefs_saves = 0;
     run("save");
     CHECK(prefs_saves == 1 && user(0) != NULL && user(0)->command == SML_USER_SAVE);
+    printf("esp: the longest loop pass, and each service's\n");
+    loop_timing_start(0);
+    loop_timing_note("pic_link", 1000);
+    loop_timing_note("tzinfo", 2301000);
+    loop_timing_end(2302000, true, 1763000000U);
+    // A command run by a console: the console is timed, the command noted.
+    loop_timing_start(5000000);
+    run("  update check");
+    loop_timing_note("telnet", 5500000);
+    loop_timing_end(5500000, true, 1763000005U);
+    loop_timing_start(3000000);
+    loop_timing_note("pic_link", 3000500);
+    loop_timing_end(3000500, false, 0);
+    out = run("esp");
+    CHECK(contains(out, "Loop:     longest pass 2.302 s (tzinfo 2.300 s) at 2025-11-13T02:13:20Z; "
+                        "1 of 3 passes over 1 s\n") &&
+          !contains(out, "longest:"));
+    out = run("esp -v");
+    CHECK(contains(out, "  longest: pic_link 1.000 ms, tzinfo 2.300 s (1 over 1 s), loop 1.000 ms, "
+                        "telnet 500.0 ms \"update check\"\n"));
     run("esp save");
     CHECK(prefs_saves == 2 && sent.empty());
     run("defaults");
@@ -1364,6 +1385,19 @@ int main(void)
     test_grammar();
     test_text_and_poll();
     test_telnet_login();
+    printf("esp -v: a password never kept as what a console was doing\n");
+    loop_timing_start(6000000);
+    run("telnet login hunter2");
+    loop_timing_note("telnet", 7600000);
+    loop_timing_end(7600000, true, 1763000007U);
+    loop_timing_start(8000000);
+    run("telnet passwd zq9"); // too short: refused, nothing changed
+    loop_timing_note("serial", 9700000);
+    loop_timing_end(9700000, true, 1763000009U);
+    std::string out = run("esp -v");
+    CHECK(contains(out, "telnet 1.600 s \"telnet login\" (1 over 1 s)") &&
+          contains(out, "serial 1.700 s \"telnet passwd\" (1 over 1 s)") && !contains(out, "hunter2") && !contains(out, "zq9"));
+
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;
 }

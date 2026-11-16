@@ -23,9 +23,12 @@ typedef struct
 
 static TaskHandle_t task;
 static QueueHandle_t arrivals;
+// busy, result and result_ready are shared by loop() and the client task:
+// each read and written under lock, so neither depends on the two tasks
+// sharing a core or on the order of plain stores.
 static portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
 static NtpServerAddress server_address;
-static volatile bool busy;
+static bool busy;
 static bool result_ready;
 static NtpPollResult result;
 static NtpClientStats stats;
@@ -213,8 +216,8 @@ static void client_task(void *argument)
         portENTER_CRITICAL(&lock);
         result = poll;
         result_ready = true;
+        busy = false; // with the result, never before it
         portEXIT_CRITICAL(&lock);
-        busy = false;
     }
 }
 
@@ -229,12 +232,20 @@ void ntp_client_init(void)
 
 bool ntp_client_poll(const NtpServerAddress *address)
 {
-    if (busy || task == NULL)
+    if (task == NULL)
     {
         return false;
     }
-    server_address = *address; // read by the task only after the notification
+    portENTER_CRITICAL(&lock);
+    if (busy)
+    {
+        portEXIT_CRITICAL(&lock);
+        return false;
+    }
     busy = true;
+    // Read by the task only after the notification, and only while busy.
+    server_address = *address;
+    portEXIT_CRITICAL(&lock);
     xTaskNotifyGive(task);
     return true;
 }
@@ -242,7 +253,12 @@ bool ntp_client_poll(const NtpServerAddress *address)
 
 bool ntp_client_busy(void)
 {
-    return busy;
+    bool now;
+
+    portENTER_CRITICAL(&lock);
+    now = busy;
+    portEXIT_CRITICAL(&lock);
+    return now;
 }
 
 

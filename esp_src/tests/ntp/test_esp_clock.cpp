@@ -200,6 +200,63 @@ int main(void)
         }
         seed++;
     }
+
+    printf("Drift allowance: a young line's skew believed up to the crystal's tolerance\n");
+    {
+        EspClockSample sample = {};
+        EspClockEstimate estimate = {};
+
+        esp_clock_init();
+        sample.local_us = 1000000;
+        sample.offset_us = 1000;
+        sample.delay_us = 2000;
+        esp_clock_update(&sample, sample.local_us, 256000000, NULL);
+        CHECK(esp_clock_drift_ppb() == 50000); // no frequency yet
+        estimate.offset_us = 1000;
+        estimate.frequency_known = true;
+        estimate.skew_ppb = 600000; // three samples: Student's t on one degree of freedom
+        sample.local_us = 65000000;
+        esp_clock_update(&sample, sample.local_us, 256000000, &estimate);
+        CHECK(esp_clock_drift_ppb() == ESP_CLOCK_DRIFT_YOUNG_PPB);
+        estimate.skew_ppb = 300; // a full line
+        sample.local_us = 129000000;
+        esp_clock_update(&sample, sample.local_us, 256000000, &estimate);
+        CHECK(esp_clock_drift_ppb() == 300 + ESP_CLOCK_DRIFT_FLOOR_PPB);
+    }
+
+    printf("Drift allowance, window fits: up to the crystal's tolerance below six samples\n");
+    {
+        // A crystal at 0 ppm, the exchanges +/-2 ms lopsided by turns: the
+        // fit's standard error is ppm-sized while it has few samples.
+        static const int64_t lopsided_us[] = {0, 2000, -2000, 2000, -2000, 2000, -2000, 2000};
+        EspClockSample sample = {};
+        int64_t young = -1;
+        int64_t grown = -1;
+
+        esp_clock_init();
+        for (int index = 0; index < 8; index++)
+        {
+            sample.local_us = 1000000 + index * 64000000LL;
+            sample.offset_us = 1000 + lopsided_us[index];
+            sample.delay_us = 2000;
+            esp_clock_update(&sample, sample.local_us, 256000000, NULL);
+            const EspClockStatus *status = esp_clock_status();
+            if (status->frequency_samples >= 2 && status->frequency_used < ESP_CLOCK_YOUNG_SAMPLES &&
+                young < 0)
+            {
+                young = esp_clock_drift_ppb();
+                printf("  %u samples: 3 x SE + floor %lld ppb\n", status->frequency_used,
+                       (long long)young);
+            }
+            if (status->frequency_used >= ESP_CLOCK_YOUNG_SAMPLES)
+            {
+                grown = esp_clock_drift_ppb();
+            }
+        }
+        CHECK(young > ESP_CLOCK_DRIFT_MAX_PPB && young <= ESP_CLOCK_DRIFT_YOUNG_PPB);
+        printf("  %u samples: %lld ppb\n", esp_clock_status()->frequency_used, (long long)grown);
+        CHECK(grown > 0 && grown <= ESP_CLOCK_DRIFT_MAX_PPB);
+    }
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;
 }

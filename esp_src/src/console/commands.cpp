@@ -18,6 +18,7 @@
 #include "../timing/ntp_gnss.h"
 #include "../tz/leap.h"
 #include "../tz/tzinfo.h"
+#include "../util/loop_timing.h"
 #include "../util/parse.h"
 #include "../util/time_text.h"
 #include "../version.h"
@@ -1663,12 +1664,69 @@ static const Entry update_entries[] = {
 
 // ---- The ESP ----------------------------------------------------------------------
 
+// The longest loop() pass and what took it; with -v, each service's longest.
+static void print_loop_timing(Stream *output, bool verbose)
+{
+    const LoopTiming *timing = loop_timing();
+    const LoopService *services;
+    int count;
+
+    if (timing->passes == 0)
+    {
+        return;
+    }
+    output->printf("Loop:     longest pass ");
+    time_print_ns(output, timing->longest_us * 1000);
+    if (timing->longest_by != NULL)
+    {
+        output->printf(" (%s ", timing->longest_by);
+        time_print_ns(output, timing->longest_by_us * 1000);
+        if (timing->longest_detail[0] != '\0')
+        {
+            output->printf(", \"%s\"", timing->longest_detail);
+        }
+        output->printf(")");
+    }
+    if (timing->longest_utc_known)
+    {
+        output->printf(" at ");
+        time_print_utc(output, timing->longest_utc);
+    }
+    else
+    {
+        output->printf(", up ");
+        time_print_duration(output, (uint32_t)(timing->longest_at_us / 1000000));
+    }
+    output->printf("; %lu of %lu passes over 1 s\n", (unsigned long)timing->slow_passes,
+                   (unsigned long)timing->passes);
+    if (!verbose)
+    {
+        return;
+    }
+    services = loop_timing_services(&count);
+    output->printf("  longest:");
+    for (int index = 0; index < count; index++)
+    {
+        output->printf("%s %s ", index == 0 ? "" : ",", services[index].name);
+        time_print_ns(output, services[index].longest_us * 1000);
+        if (services[index].longest_detail[0] != '\0')
+        {
+            output->printf(" \"%s\"", services[index].longest_detail);
+        }
+        if (services[index].slow != 0)
+        {
+            output->printf(" (%lu over 1 s)", (unsigned long)services[index].slow);
+        }
+    }
+    output->printf("\n");
+}
+
 static void bare_esp(Stream *output, bool verbose)
 {
-    (void)verbose;
     output->printf("ESP %s (%s), up ", ESP_VERSION, wifi_link_hostname());
     time_print_duration(output, (uint32_t)(esp_timer_get_time() / 1000000));
     output->printf(", last reset: %s\n", commands_reset_reason());
+    print_loop_timing(output, verbose);
     user_prefs_print(output);
 }
 
@@ -1986,6 +2044,48 @@ static bool is_verbose_flag(const char *text)
     return strcmp(text, "-v") == 0 || strcasecmp(text, "verbose") == 0;
 }
 
+/*
+ * The line, for loop_timing's record of what took the time: whoever
+ * dispatched a command (the serial console, telnet) is the service timed,
+ * and the command is what it was doing. A password never goes in: "telnet
+ * login" and "telnet passwd" are kept without what follows.
+ */
+static void note_for_timing(const char *line)
+{
+    char text[LOOP_TIMING_DETAIL];
+    char *word;
+    size_t length = 0;
+
+    while (*line == ' ')
+    {
+        line++;
+    }
+    while (line[length] != '\0' && length < sizeof(text) - 1)
+    {
+        text[length] = line[length];
+        length++;
+    }
+    text[length] = '\0';
+    if (strncasecmp(text, "telnet ", 7) == 0)
+    {
+        word = text + 7;
+        while (*word == ' ')
+        {
+            word++;
+        }
+        if (strncasecmp(word, "login", 5) == 0)
+        {
+            word[5] = '\0';
+        }
+        else if (strncasecmp(word, "passwd", 6) == 0)
+        {
+            word[6] = '\0';
+        }
+    }
+    loop_timing_detail(text);
+}
+
+
 void commands_execute(Stream *output, char *line)
 {
     char *end;
@@ -1998,6 +2098,7 @@ void commands_execute(Stream *output, char *line)
     size_t index;
     bool verbose = verbose_setting;
 
+    note_for_timing(line);
     while (isspace((unsigned char)*line))
     {
         line++;

@@ -17,6 +17,7 @@
  * receive buffer holds several seconds of PIC traffic.
  */
 #include <Arduino.h>
+#include <esp_timer.h>
 
 #include "src/board.h"
 #include "src/console/commands.h"
@@ -30,9 +31,11 @@
 #include "src/settings/user_prefs.h"
 #include "src/timing/ntp.h"
 #include "src/timing/ntp_gnss.h"
+#include "src/timing/esp_time.h"
 #include "src/timing/pps.h"
 #include "src/tz/leap.h"
 #include "src/tz/tzinfo.h"
+#include "src/util/loop_timing.h"
 #include "src/version.h"
 
 #define LED_PULSE_MS 100U
@@ -86,21 +89,31 @@ static void service_ntp_report(void)
 }
 
 
+// Each service timed as it returns: the longest pass and its cause in esp -v.
+#define TIMED(name, call)                                    \
+    do                                                       \
+    {                                                        \
+        call;                                                \
+        loop_timing_note(name, esp_timer_get_time());        \
+    } while (0)
+
 void loop()
 {
     bool network_up;
+    uint32_t utc = 0;
 
-    pic_link_service();
-    ntp_gnss_service();
-    pic_boot_service();
-    wifi_link_service();
+    loop_timing_start(esp_timer_get_time());
+    TIMED("pic_link", pic_link_service());
+    TIMED("ntp_gnss", ntp_gnss_service());
+    TIMED("pic_boot", pic_boot_service());
+    TIMED("wifi", wifi_link_service());
     network_up = wifi_link_is_up();
-    ntp_service(network_up);
-    service_ntp_report();
-    tzinfo_service(network_up);
-    leap_service();
-    net_status_service();
-    updater_poll(network_up);
+    TIMED("ntp", ntp_service(network_up));
+    TIMED("ntp_report", service_ntp_report());
+    TIMED("tzinfo", tzinfo_service(network_up));
+    TIMED("leap", leap_service());
+    TIMED("net_status", net_status_service());
+    TIMED("updater_poll", updater_poll(network_up));
 
     if (console_read_line(&serial_line, &Serial, true))
     {
@@ -108,7 +121,8 @@ void loop()
         console_line_clear(&serial_line);
         Serial.print("> ");
     }
-    telnet_service();
+    loop_timing_note("serial", esp_timer_get_time());
+    TIMED("telnet", telnet_service());
 
     if (led_on_ms != 0)
     {
@@ -131,12 +145,14 @@ void loop()
             }
         }
     }
+    loop_timing_note("led", esp_timer_get_time());
     if (network_up && millis() - last_minute_ms >= MINUTE_MS)
     {
         uint32_t local;
         bool have_local = tzinfo_local_now(&local);
 
         last_minute_ms = millis();
-        updater_service(have_local, local);
+        TIMED("updater", updater_service(have_local, local));
     }
+    loop_timing_end(esp_timer_get_time(), esp_time_utc_now(&utc), utc);
 }

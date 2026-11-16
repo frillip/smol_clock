@@ -45,7 +45,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifndef NTP_STATS_MAX_SAMPLES // overridden only by the host simulation (tests/ntp)
 #define NTP_STATS_MAX_SAMPLES    16 // in the line at most (chronyd's maxsamples, 64 by default)
+#endif
 #define NTP_STATS_RUNS_RATIO     2 // samples kept for the runs test, per sample in the line
 #define NTP_STATS_MIN_REGRESS    3 // a line needs this many
 #define NTP_STATS_MIN_SAMPLES    6 // the runs test never leaves fewer (chronyd's minsamples)

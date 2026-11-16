@@ -252,6 +252,9 @@ EspClockAction esp_clock_update(const EspClockSample *sample, int64_t now_us,
     status->updates++;
     status->last = *sample;
     status->last_update_local_us = sample->local_us;
+    // As the sample measured it, not the model run back later: a later step
+    // would move that by the step.
+    status->last_update_utc_us = sample->local_us + sample->offset_us;
     status->estimated = estimate != NULL;
     remember(sample);
     if (now_us < sample->local_us)
@@ -358,15 +361,23 @@ int64_t esp_clock_drift_ppb(void)
     if (status->skew_ppb >= 0)
     {
         // A young line's skew is large (Student's t on one or two degrees
-        // of freedom): believed up to the 5 ppm of a first estimate.
+        // of freedom): believed up to the crystal's tolerance.
         ppb = (int64_t)status->skew_ppb + ESP_CLOCK_DRIFT_FLOOR_PPB;
         return ppb > ESP_CLOCK_DRIFT_YOUNG_PPB ? ESP_CLOCK_DRIFT_YOUNG_PPB : ppb;
     }
     if (status->frequency_samples == 1 || status->frequency_error_ppb < 0)
     {
-        return 5000;
+        return ESP_CLOCK_DRIFT_YOUNG_PPB; // one estimate: as good as two samples
     }
     ppb = 3LL * status->frequency_error_ppb + ESP_CLOCK_DRIFT_FLOOR_PPB;
+    if (status->frequency_used < ESP_CLOCK_YOUNG_SAMPLES)
+    {
+        // A fit of three to five samples: its standard error is believed up
+        // to the crystal's tolerance, as a young line's skew is. Capped at
+        // 2 ppm, a second estimate from three samples with one held up by
+        // Wi-Fi could understate the drift several times over.
+        return ppb > ESP_CLOCK_DRIFT_YOUNG_PPB ? ESP_CLOCK_DRIFT_YOUNG_PPB : ppb;
+    }
     return ppb > ESP_CLOCK_DRIFT_MAX_PPB ? ESP_CLOCK_DRIFT_MAX_PPB : ppb;
 }
 
@@ -375,6 +386,12 @@ void esp_clock_new_reference(void)
 {
     clock_state.window_count = 0;
     clock_state.window_next = 0;
+}
+
+
+uint8_t esp_clock_window_samples(void)
+{
+    return clock_state.window_count;
 }
 
 

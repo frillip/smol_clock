@@ -19,10 +19,12 @@ sml.o: $(SRC)/pic/sml/sml.c
 
 test_commands: test_commands.cpp sml.o sha256.o $(SRC)/console/commands.cpp $(SRC)/pic/pic_link.cpp \
                $(SRC)/pic/pic_report.cpp $(SRC)/pic/sml_stream.cpp $(SRC)/util/parse.cpp \
-               $(SRC)/util/time_text.cpp $(SRC)/net/telnet_auth.cpp $(SRC)/util/sha256.c stubs/Arduino.h
+               $(SRC)/util/time_text.cpp $(SRC)/util/loop_timing.cpp $(SRC)/net/telnet_auth.cpp \
+               $(SRC)/util/sha256.c stubs/Arduino.h
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ test_commands.cpp sml.o $(SRC)/console/commands.cpp \
 	    $(SRC)/pic/pic_link.cpp $(SRC)/pic/pic_report.cpp $(SRC)/pic/sml_stream.cpp \
-	    $(SRC)/util/parse.cpp $(SRC)/util/time_text.cpp $(SRC)/net/telnet_auth.cpp sha256.o
+	    $(SRC)/util/parse.cpp $(SRC)/util/time_text.cpp $(SRC)/util/loop_timing.cpp \
+	    $(SRC)/net/telnet_auth.cpp sha256.o
 
 clean:
 	rm -f test_commands sml.o sha256.o

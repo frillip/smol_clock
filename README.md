@@ -273,7 +273,7 @@ Values are written as people write them: on/off (or 1/0, yes/no), offsets as `+5
 | `update server <host>`, `update path <path>` | The update manifest |
 | `update config <name>` | An update profile such as `development`, `default` clears it |
 | `update auto off\|<hour>` | Daily automatic updates in that local hour, 0–23 |
-| `esp` | Version, uptime, reset cause and settings |
+| `esp [-v]` | Version, uptime, reset cause, the longest `loop()` pass (which service took it, when, and how many passes ran over a second; `-v` each service's longest) and settings |
 | `esp save`, `esp defaults`, `esp reset` | Save, defaults or restart for the ESP alone |
 | `esp factory` | Default ESP settings saved, Wi-Fi forgotten, and restart |
 

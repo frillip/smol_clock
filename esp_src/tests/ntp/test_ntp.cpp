@@ -91,6 +91,7 @@ typedef struct
     int64_t bias_us;
     int64_t delay_us;
     uint32_t polls;
+    const char *kiss; // answers with this kiss-o'-death instead, if set
 } FakeServer;
 
 static FakeServer fake[10];
@@ -147,7 +148,12 @@ bool ntp_client_poll(const NtpServerAddress *address)
     snprintf(result.address, sizeof result.address, "192.0.2.%u", address->bytes[3]);
     server->polls++;
     stats.polls++;
-    if (server->answers)
+    if (server->answers && server->kiss != NULL)
+    {
+        result.last_result = NTP_REPLY_KISS;
+        snprintf(result.kiss, sizeof result.kiss, "%s", server->kiss);
+    }
+    else if (server->answers)
     {
         result.ok = true;
         result.replies = 4;
@@ -204,9 +210,20 @@ bool pps_output_running(void)
 }
 
 
-bool pps_output_take(PpsEdge *)
+// Off, or an edge each second of fake time: then TIME-NTP reports are built.
+static bool pps_on;
+static int64_t pps_last_us;
+static uint32_t pps_sequence;
+bool pps_output_take(PpsEdge *edge)
 {
-    return false;
+    if (!pps_on || fake_now_us == pps_last_us)
+    {
+        return false;
+    }
+    pps_last_us = fake_now_us;
+    edge->local_us = fake_now_us;
+    edge->sequence = ++pps_sequence;
+    return true;
 }
 
 
@@ -412,8 +429,8 @@ int main(void)
     }
 
     printf("A pool name: resolved once, kept, and again only once it fails\n");
-    fake[7] = (FakeServer){true, 0, 2000, 0};
-    fake[8] = (FakeServer){true, 0, 2000, 0};
+    fake[7] = (FakeServer){true, 0, 2000, 0, NULL};
+    fake[8] = (FakeServer){true, 0, 2000, 0, NULL};
     fake[6].answers = true;
     user_prefs_set_string(user_prefs_ntp_server(1), "pool.example");
     pool_lookups = 0;
@@ -435,7 +452,7 @@ int main(void)
     CHECK(contains(console, "NTP: poll of pool.example failed"));
 
     printf("Server 0, DHCP's: polled once offered, preferred, disabled\n");
-    fake[9] = (FakeServer){true, 0, 1500, 0};
+    fake[9] = (FakeServer){true, 0, 1500, 0, NULL};
     user_prefs_ntp_dhcp = NTP_DHCP_ENABLED;
     run_s(300);
     CHECK(fake[9].polls == 0 && contains(sources(), "? 0 dhcp")); // nothing offered yet
@@ -499,6 +516,235 @@ int main(void)
         {
             ntp_set_offset(server, 0);
         }
+    }
+
+    printf("A followed server's statistics restart (another address): the clock's window too\n");
+    for (int index = 1; index < NTP_SERVERS; index++)
+    {
+        user_prefs_set_string(user_prefs_ntp_server(index), "");
+    }
+    user_prefs_set_string(user_prefs.fields.ntp.server, "pool.example");
+    fake[7] = (FakeServer){true, 0, 2000, 0, NULL};
+    fake[8] = (FakeServer){true, 0, 2000, 0, NULL};
+    pool_lookups = 0;
+    ntp_init();
+    run_s(3000);
+    CHECK(esp_clock_window_samples() == ESP_CLOCK_WINDOW);
+    fake[7].answers = false; // its first address, kept until it fails
+    console.clear();
+    run_s(400);
+    {
+        Stream out;
+        ntp_print(&out, true);
+        CHECK(pool_lookups == 2 && fake[8].polls > 0);
+        CHECK(contains(out.out, "statistics restarted 1 times"));
+        printf("  window: %u samples after the new address's first\n", esp_clock_window_samples());
+        CHECK(esp_clock_window_samples() < ESP_CLOCK_WINDOW / 2);
+    }
+
+    printf("The same address under two numbers: the higher set aside, not polled\n");
+    fake[5] = (FakeServer){true, 0, 2000, 0, NULL};
+    fake[6] = (FakeServer){true, 0, 2000, 0, NULL};
+    user_prefs_set_string(user_prefs.fields.ntp.server, "192.0.2.6");
+    user_prefs_set_string(user_prefs_ntp_server(1), "s6.example");
+    ntp_init();
+    console.clear();
+    run_s(1500);
+    {
+        std::string table = sources();
+        CHECK(contains(table, "= 2 s6.example") && contains(table, "192.0.2.6, as server 1\n"));
+        CHECK(contains(console, "is the same address as server 1: not polled"));
+        CHECK(contains(table, "* 1 192.0.2.6") && (ntp_servers_in_use() & 0x04) == 0);
+    }
+    uint32_t polls_6 = fake[6].polls;
+    run_s(1280);
+    printf("  192.0.2.6 polled %u times in 1280 s, as one server\n", fake[6].polls - polls_6);
+    CHECK(fake[6].polls - polls_6 <= 1280 / 128 + 1);
+    // Another host for it: polled again.
+    user_prefs_set_string(user_prefs_ntp_server(1), "s5.example");
+    run_s(1500);
+    CHECK(!contains(sources(), "= 2") && contains(sources(), " 2 s5.example") && fake[5].polls >= 3);
+
+    printf("DHCP's server the same as one set by name: DHCP's (0) kept\n");
+    dhcp_address = IPAddress(IPv4, 5);
+    dhcp_offered = true;
+    user_prefs_ntp_dhcp = NTP_DHCP_ENABLED;
+    user_prefs_ntp_offset_us[2] = 120; // set for s5.example, not for DHCP's
+    console.clear();
+    run_s(1500);
+    CHECK(contains(sources(), "= 2 s5.example") &&
+          contains(sources(), ", as server 0 (its offset +0 us used, not +120)\n"));
+    CHECK(contains(console, "server 2's offset +120 us is not used: server 0's (+0 us) is"));
+    user_prefs_ntp_offset_us[2] = 0;
+    CHECK(!contains(sources(), "= 0"));
+    user_prefs_ntp_dhcp = NTP_DHCP_DISABLED;
+    dhcp_offered = false;
+    console.clear();
+    run_s(1500);
+    CHECK(!contains(sources(), "= 2") &&
+          contains(console, "server 2 is no longer the same address as server 0"));
+
+    printf("Two usable servers 20 ms apart: DISAGREE, and the bound covers both\n");
+    {
+        SML_TIME_NTP_PAYLOAD report;
+        int under = 0;
+
+        fake[5].bias_us = 20000;
+        pps_on = true;
+        run_s(3000);
+        CHECK(ntp_servers_disagree());
+        CHECK(ntp_take_report(&report));
+        printf("  bound %.3f ms, clock error %+lld us\n", report.uncertainty_ns / 1e6,
+               (long long)error_us());
+        CHECK(report.uncertainty_ns > 20000000U - 1000000U);
+        CHECK(report.uncertainty_ns > (uint32_t)(magnitude(error_us()) * 1000));
+        // The one followed moves 6 ms (gently slewed, minutes): the bound,
+        // worked out each second, holds every second meanwhile.
+        int followed = contains(sources(), "* 1 ") ? 6 : 5;
+        fake[followed].bias_us += 6000;
+        for (int second = 0; second < 1500; second++)
+        {
+            run_s(1);
+            if (ntp_take_report(&report) &&
+                report.uncertainty_ns < (uint32_t)(magnitude(error_us() + (followed == 6 ? 0 : 0)) * 1000))
+            {
+                under++;
+            }
+        }
+        printf("  slewing 6 ms: bound under the true error in %d of 1500 seconds\n", under);
+        CHECK(under == 0 && ntp_servers_disagree());
+        fake[followed].bias_us -= 6000;
+        run_s(2000);
+        // TIME-NTP's last update: the sample's own UTC, the true time then.
+        CHECK(ntp_take_report(&report) &&
+              report.last_update_utc ==
+                  (uint32_t)((esp_clock_status()->last_update_local_us + TRUTH_US +
+                              fake[followed].bias_us) / 1000000));
+        // Agreeing again: the bound back to the clock's own.
+        fake[5].bias_us = 0;
+        run_s(4000);
+        CHECK(!ntp_servers_disagree());
+        CHECK(ntp_take_report(&report) && report.uncertainty_ns < 5000000U);
+        printf("  agreeing: bound %.3f ms\n", report.uncertainty_ns / 1e6);
+    }
+
+    printf("From start: ACQUIRING and the crystal's drift allowance until the line is full\n");
+    {
+        SML_TIME_NTP_PAYLOAD report;
+
+        user_prefs_set_string(user_prefs_ntp_server(1), "");
+        ntp_init();
+        run_s(10);
+        CHECK(ntp_take_report(&report) && report.lock_state == SML_LOCK_ACQUIRING);
+        CHECK(esp_clock_drift_ppb() == 50000); // no frequency yet
+        for (int waited = 0; waited < 1000 && esp_clock_status()->frequency_samples == 0; waited += 10)
+        {
+            run_s(10);
+        }
+        // A first estimate (the cap on a young line's skew: test_esp_clock).
+        CHECK(esp_clock_status()->frequency_samples != 0);
+        CHECK(esp_clock_drift_ppb() <= ESP_CLOCK_DRIFT_YOUNG_PPB);
+        CHECK(ntp_take_report(&report) && report.lock_state == SML_LOCK_ACQUIRING);
+        run_s(3000);
+        CHECK(ntp_take_report(&report) && report.lock_state == SML_LOCK_LOCKED);
+        CHECK(esp_clock_drift_ppb() < 2000);
+        pps_on = false;
+    }
+
+    printf("Kiss-o'-death RATE: that server polled half as often, then eased back\n");
+    {
+        Stream out;
+
+        user_prefs_set_string(user_prefs_ntp_server(1), "s5.example");
+        fake[5] = (FakeServer){true, 0, 2000, 0, NULL};
+        fake[6] = (FakeServer){true, 0, 2000, 0, NULL};
+        ntp_init();
+        run_s(3000);
+        uint32_t before = fake[5].polls;
+        fake[5].kiss = "RATE";
+        console.clear();
+        run_s(600);
+        CHECK(contains(console, "s5.example asks to be polled less often (RATE): every "));
+        fake[5].kiss = NULL;
+        uint32_t at = fake[5].polls;
+        uint32_t at_6 = fake[6].polls;
+        run_s(4096);
+        printf("  after RATE: server 2 polled %u times in 4096 s, server 1 %u times\n",
+               fake[5].polls - at, fake[6].polls - at_6);
+        CHECK(fake[5].polls - at < fake[6].polls - at_6 && at > before);
+        ntp_print(&out, true);
+        CHECK(contains(out.out, "RATE, 0 DENY or RSTR, 0 other") && contains(out.out, "(RATE)"));
+        run_s(512 * 100); // 8 good polls at each slower rate, from the longest down
+        out.out.clear();
+        ntp_print(&out, true);
+        CHECK(!contains(out.out, "(RATE)")); // eased back after good polls
+    }
+
+    printf("Kiss-o'-death DENY: not polled again until ntp sync\n");
+    {
+        Stream out;
+
+        fake[5].kiss = "DENY";
+        console.clear();
+        run_s(1100);
+        CHECK(contains(console, "s5.example refuses to serve (DENY)"));
+        uint32_t at = fake[5].polls;
+        run_s(10000);
+        CHECK(fake[5].polls == at);
+        ntp_print(&out, true);
+        CHECK(contains(out.out, "REFUSED (DENY), not polled") && contains(out.out, "1 DENY or RSTR"));
+        CHECK(contains(sources(), "? 2 s5.example"));
+        fake[5].kiss = NULL;
+        ntp_resync();
+        run_s(30);
+        CHECK(fake[5].polls > at);
+        out.out.clear();
+        ntp_print(&out, true);
+        CHECK(!contains(out.out, "REFUSED"));
+    }
+
+    printf("ntp.interval lowered: polls already scheduled come in, in order\n");
+    {
+        user_prefs.fields.ntp.interval = 86400;
+        ntp_init();
+        run_s(600);
+        fake[5].kiss = "RATE"; // a long wait for server 2: 1024 s and up
+        run_s(1100);
+        fake[5].kiss = NULL;
+        fake[5].kiss = "RATE";
+        run_s(2200);
+        fake[5].kiss = NULL;
+        Stream out;
+        ntp_print(&out, true);
+        uint32_t at = fake[5].polls;
+        user_prefs.fields.ntp.interval = 128;
+        run_s(128 * 4 + 64);
+        printf("  after lowering to 128 s: %u polls of server 2 in 576 s\n", fake[5].polls - at);
+        CHECK(fake[5].polls > at);
+        user_prefs.fields.ntp.interval = 512;
+    }
+
+    printf("Unbounded (4.29 s and more): UNCERTAINTY_VALID cleared, not a 4.29 s bound\n");
+    {
+        SML_TIME_NTP_PAYLOAD report;
+
+        fake[5] = (FakeServer){true, 0, 2000, 0, NULL};
+        fake[6] = (FakeServer){true, 5000000, 2000, 0, NULL}; // 5 s off
+        user_prefs_set_string(user_prefs_ntp_server(1), "s6.example");
+        ntp_init();
+        user_prefs_set_string(user_prefs_ntp_server(1), "s5.example");
+        user_prefs_set_string(user_prefs_ntp_server(2), "s6.example");
+        pps_on = true;
+        run_s(4000);
+        CHECK(ntp_servers_disagree());
+        CHECK(ntp_take_report(&report) && report.uncertainty_ns == UINT32_MAX &&
+              (report.flags & SML_NTP_UNCERTAINTY_VALID) == 0 &&
+              (report.flags & SML_NTP_TIME_VALID) != 0);
+        Stream out;
+        ntp_print(&out, false);
+        CHECK(contains(out.out, "+/- over 4.29 s"));
+        pps_on = false;
+        user_prefs_set_string(user_prefs_ntp_server(2), "");
     }
 
     printf("%d checks, %d failures\n", checks, failures);
