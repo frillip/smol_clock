@@ -12,7 +12,26 @@
 #include "telnet_auth.h"
 #include "wifi_link.h"
 
-static ESPTelnetStream telnet;
+/*
+ * The library's stream, without its flush(). ESPTelnet calls flush() on
+ * every connect and disconnect (emptyClientStream()), and on the ESP32 that
+ * waits for the client's write buffer to read steady and above zero for
+ * 10 ms, up to the keep-alive interval (1 s). NetworkClient does not report
+ * that buffer (availableForWrite() is 0), so every connection held loop()
+ * up for the whole second, plus 50 ms: an ESP PPS edge run on and a late
+ * TIME-NTP for each (seen once a minute with tools/clock_monitor.py). Our
+ * output never needs it: replies and console text go through the queues
+ * below, written with MSG_DONTWAIT.
+ */
+class TelnetLink : public ESPTelnetStream
+{
+  public:
+    void flush() override
+    {
+    }
+};
+
+static TelnetLink telnet;
 static bool running;
 static ConsoleLine line;
 // Console output waiting for the socket, sent from telnet_service().
