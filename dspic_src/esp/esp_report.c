@@ -10,6 +10,7 @@
 #include "../drivers/pcf8563.h"
 #include "../drivers/tubes.h"
 #include "../drivers/veml6040.h"
+#include "../drivers/bme280.h"
 #include "../gnss/gnss.h"
 #include "../menu/menu.h"
 #include "../platform/boot.h"
@@ -535,6 +536,8 @@ void esp_report_stat_ui(SML_STAT_UI_PAYLOAD *payload)
 void esp_report_stat_env(SML_STAT_ENV_PAYLOAD *payload)
 {
     const Veml6040Status *light = veml6040_status();
+    const Bme280Status *env = bme280_status();
+    const Bme280Reading *reading = &env->reading;
 
     memset(payload, 0, sizeof(*payload));
     if (light->present)
@@ -545,6 +548,28 @@ void esp_report_stat_env(SML_STAT_ENV_PAYLOAD *payload)
     {
         payload->flags |= SML_ENV_LUX_VALID;
         payload->lux = (uint16_t)(((uint32_t)light->lux_x10 + 5UL) / 10UL);
+    }
+    if (env->present && env->identified)
+    {
+        payload->flags |= SML_ENV_BME_PRESENT;
+    }
+    if (env->configured && reading->temperature_valid)
+    {
+        // The sensor reads the board; the room is a rough guess from it.
+        payload->flags |= SML_ENV_BOARD_TEMP_VALID | SML_ENV_TEMP_VALID;
+        payload->board_temperature_centic = (int16_t)reading->temperature_centic;
+        payload->ambient_temperature_centic =
+            (int16_t)(reading->temperature_centic + BME280_AMBIENT_OFFSET_CENTIC);
+    }
+    if (env->configured && reading->temperature_valid && reading->pressure_valid)
+    {
+        payload->flags |= SML_ENV_PRESSURE_VALID;
+        payload->pressure_deca_pa = (uint16_t)((reading->pressure_pa + 5UL) / 10UL);
+    }
+    if (env->configured && reading->temperature_valid && reading->humidity_valid)
+    {
+        payload->flags |= SML_ENV_HUMIDITY_VALID;
+        payload->humidity_centipercent = reading->humidity_centipercent;
     }
 }
 
@@ -856,6 +881,8 @@ static void print_display(bool verbose, uint32_t now_ms)
     brightness_print(verbose);
     printf("  ");
     veml6040_print(now_ms, verbose);
+    printf("  ");
+    bme280_print(now_ms, verbose);
     printf("  ");
     controls_print(verbose);
     printf("  ");

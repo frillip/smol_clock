@@ -41,7 +41,8 @@ void esp_report_time_gnss(uint32_t now_ms, SML_TIME_GNSS_PAYLOAD *payload);
 // clock, and its bound (sync/source_rtc.h). No PPS or temperature on V2.
 void esp_report_time_rtc(SML_TIME_RTC_PAYLOAD *payload);
 void esp_report_stat_ui(SML_STAT_UI_PAYLOAD *payload);
-// The sensors: the ambient light so far (no BME280 on V2+ yet).
+// The sensors: the ambient light, and the BME280's board temperature (and
+// the room guessed from it), pressure and humidity.
 void esp_report_stat_env(SML_STAT_ENV_PAYLOAD *payload);
 // The synchroniser's candidates. epoch_sequence: the latest epoch's.
 void esp_report_stat_sources(uint32_t epoch_sequence, SML_STAT_SOURCES_PAYLOAD *payload);

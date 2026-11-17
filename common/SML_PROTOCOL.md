@@ -126,7 +126,7 @@ The "V2+ PIC" column in the message catalogue and the command table records what
 | 0x20 TZ | 0x01 | TZ-STATE | ESP→PIC | 124 | ✓ Applied | On change, after a PIC reset, and every ~10 minutes |
 | | 0x10 | _Retired: TZ-FUTURE_ | — | — | — | Never reuse |
 | 0x30 STAT | 0x01 | STAT-UI | PIC→ESP | 32 | ✓ Sent | Every epoch |
-| | 0x10 | STAT-ENV | PIC→ESP | 14 | ✓ Sent: light only | Every 5 seconds |
+| | 0x10 | STAT-ENV | PIC→ESP | 14 | ✓ Sent: light and BME280 | Every 5 seconds |
 | | 0x20 | STAT-SUPPLY | PIC→ESP | 14 | — V3 hardware | Every few seconds |
 | | 0x30 | STAT-SETTINGS | PIC→ESP | 36 | ✓ Sent | On change, after reset, on request |
 | | 0x40 | STAT-NET | ESP→PIC | 24 | ✓ Received and held | On change, and every 10 seconds |
@@ -507,7 +507,7 @@ _Sensors. PIC→ESP, 14 bytes._
 
 A value out of range clears its validity flag rather than wrapping. There are no sentinel values and no sample ages.
 
-The V2+ PIC sends STAT-ENV in every epoch numbered a multiple of 5, and on request. Only the light is filled in so far, from the VEML6040: `LUX_PRESENT` while it answers, `LUX_VALID` while its reading is neither saturated nor too dark to measure, the lux rounded to whole lux.
+The V2+ PIC sends STAT-ENV in every epoch numbered a multiple of 5, and on request. The light comes from the VEML6040: `LUX_PRESENT` while it answers, `LUX_VALID` while its reading is neither saturated nor too dark to measure, the lux rounded to whole lux. The rest comes from the BME280 (from PIC 0.3.41): `BME_PRESENT` while a chip with its ID answers, `BOARD_TEMP_VALID` with a measurement once it is configured, `board_temperature_centic` being what it reads. The power supplies warm the board well above the room, so `ambient_temperature_centic` (with `TEMP_VALID`) is only the board less a fixed 12.8°C. `PRESSURE_VALID` and `HUMIDITY_VALID` each with their own measurement.
 
 ## STAT-SUPPLY (0x20)
 

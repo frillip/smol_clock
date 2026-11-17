@@ -10,6 +10,7 @@
 #include "../../drivers/pcf8563.h"
 #include "../../drivers/tubes.h"
 #include "../../drivers/veml6040.h"
+#include "../../drivers/bme280.h"
 #include "../../menu/menu.h"
 #include "../../ui/alarm.h"
 #include "../../ui/brightness.h"
@@ -272,6 +273,22 @@ void veml6040_print(uint32_t now_ms, bool verbose)
     (void)verbose;
     (void)now_ms;
     note("light");
+}
+
+
+// The BME280, as the test sets it.
+static Bme280Status bme;
+const Bme280Status *bme280_status(void)
+{
+    return &bme;
+}
+
+
+void bme280_print(uint32_t now_ms, bool verbose)
+{
+    (void)verbose;
+    (void)now_ms;
+    note("env");
 }
 
 
@@ -927,6 +944,37 @@ int main(void)
         CHECK(env.lux == 2062);
     }
 
+    // STAT-ENV: the BME280, each reading while valid; the ambient guessed
+    // from the board.
+    {
+        SML_STAT_ENV_PAYLOAD payload;
+        uint16_t lux_flags = SML_ENV_LUX_PRESENT | SML_ENV_LUX_VALID;
+
+        bme.present = true;
+        esp_report_stat_env(&payload);
+        CHECK(payload.flags == lux_flags); // not identified yet
+        bme.identified = true;
+        bme.reading.temperature_valid = true;
+        bme.reading.temperature_centic = 3441;
+        esp_report_stat_env(&payload);
+        CHECK(payload.flags == (lux_flags | SML_ENV_BME_PRESENT)); // not configured
+        bme.configured = true;
+        bme.reading.pressure_valid = true;
+        bme.reading.pressure_pa = 101284;
+        bme.reading.humidity_valid = true;
+        bme.reading.humidity_centipercent = 4821;
+        esp_report_stat_env(&payload);
+        CHECK(payload.flags == (lux_flags | SML_ENV_BME_PRESENT | SML_ENV_BOARD_TEMP_VALID |
+                                SML_ENV_TEMP_VALID | SML_ENV_PRESSURE_VALID |
+                                SML_ENV_HUMIDITY_VALID));
+        CHECK(payload.board_temperature_centic == 3441 &&
+              payload.ambient_temperature_centic == 3441 + BME280_AMBIENT_OFFSET_CENTIC &&
+              payload.pressure_deca_pa == 10128 && payload.humidity_centipercent == 4821);
+        bme.reading.temperature_valid = false;
+        esp_report_stat_env(&payload);
+        CHECK(payload.flags == (lux_flags | SML_ENV_BME_PRESENT));
+    }
+
     // STAT-SYS.
     {
         SML_STAT_SYS_PAYLOAD sys;
@@ -972,7 +1020,7 @@ int main(void)
         } topics[] = {
             {SML_SHOW_STORED, "stored "},
             {SML_SHOW_TZ, ""},                                      // timezone.c itself, to stdout
-            {SML_SHOW_DISPLAY, "brightness light controls alarm "}, // the counters: verbose
+            {SML_SHOW_DISPLAY, "brightness light env controls alarm "}, // the counters: verbose
             {SML_SHOW_RTC, "pcf8563 rtc-source "},
             {SML_SHOW_OSC, "oscillator "},
             {SML_SHOW_GNSS, "gnss "},
@@ -988,7 +1036,7 @@ int main(void)
         }
         printed[0] = '\0';
         CHECK(esp_report_show(SML_SHOW_DISPLAY, true, 1000) &&
-              strcmp(printed, "display brightness light controls alarm ") == 0);
+              strcmp(printed, "display brightness light env controls alarm ") == 0);
         printed[0] = '\0';
         CHECK(!esp_report_show(SML_SHOW_ALL, false, 1000) &&
               !esp_report_show(SML_SHOW_COUNT, false, 1000) && printed[0] == '\0');

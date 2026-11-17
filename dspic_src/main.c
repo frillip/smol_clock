@@ -25,6 +25,7 @@
 #include "drivers/i2c1.h"
 #include "drivers/pcf8563.h"
 #include "drivers/veml6040.h"
+#include "drivers/bme280.h"
 #include "esp/esp_link.h"
 #include "esp/esp_report.h"
 #include "esp/spl_writer.h"
@@ -363,6 +364,7 @@ static void report_minute(void)
         pcf8563_print(epoch_timer_ms(), rtc_reference(), true);
         source_rtc_print(true);
         veml6040_print(epoch_timer_ms(), true);
+        bme280_print(epoch_timer_ms(), true);
         brightness_print(true);
         controls_print(true);
         alarm_print(true);
@@ -394,6 +396,7 @@ int main(void)
     i2c1_set_stamp_clock(pps_capture_timebase);
     pcf8563_init(epoch_timer_ms());
     veml6040_init();
+    bme280_init();
     source_rtc_init();
     timezone_init();
     display_init();
@@ -458,6 +461,13 @@ int main(void)
         if (veml6040_report_due() && debug_enabled(DEBUG_EVENTS))
         {
             veml6040_print(scheduler_now_ms(), false);
+        }
+        // The BME280 likewise.
+        bme280_set_auto_read(source_rtc_state()->activity == SOURCE_RTC_IDLE);
+        (void)bme280_service(scheduler_now_ms());
+        if (bme280_report_due() && debug_enabled(DEBUG_EVENTS))
+        {
+            bme280_print(scheduler_now_ms(), false);
         }
 
         // Every epoch, at the measurement slot (set by the T4 scheduler

@@ -18,6 +18,7 @@
         <itemPath>drivers/flash.h</itemPath>
         <itemPath>drivers/buzzer.h</itemPath>
         <itemPath>drivers/veml6040.h</itemPath>
+        <itemPath>drivers/bme280.h</itemPath>
         <itemPath>drivers/boot_image.h</itemPath>
       </logicalFolder>
       <logicalFolder name="esp" displayName="esp" projectFiles="true">
@@ -117,6 +118,7 @@
         <itemPath>drivers/flash.c</itemPath>
         <itemPath>drivers/buzzer.c</itemPath>
         <itemPath>drivers/veml6040.c</itemPath>
+        <itemPath>drivers/bme280.c</itemPath>
         <itemPath>drivers/boot_image.c</itemPath>
       </logicalFolder>
       <logicalFolder name="esp" displayName="esp" projectFiles="true">

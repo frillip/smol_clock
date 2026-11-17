@@ -15,7 +15,7 @@ GNSS_SOURCES := $(C)/text.c host_console.c ../../platform/utc.c $(G)/ubx_parser.
 
 all: test_text test_utc test_numeric sim_new test_epoch_scheduler test_acquire test_sync test_sources test_monitor test_console test_gnss test_uart2 \
      test_display test_scheduler test_sml test_timezone test_esp_link test_esp_report test_i2c test_rtc \
-     test_store test_settings test_epoch_resume test_brightness test_veml6040 test_controls test_buzzer test_beeps test_alarm test_menu test_set_time test_boot_layout test_boot test_fault test_spl_writer
+     test_store test_settings test_epoch_resume test_brightness test_veml6040 test_bme280 test_controls test_buzzer test_beeps test_alarm test_menu test_set_time test_boot_layout test_boot test_fault test_spl_writer
 	./test_text
 	./test_utc
 	./test_numeric
@@ -46,6 +46,7 @@ all: test_text test_utc test_numeric sim_new test_epoch_scheduler test_acquire t
 	./test_epoch_resume
 	./test_brightness
 	./test_veml6040
+	./test_bme280
 	./test_controls
 	./test_buzzer
 	./test_beeps
@@ -222,6 +223,10 @@ test_controls: test_controls.c $(U)/controls.c
 test_veml6040: test_veml6040.c $(D)/veml6040.c
 	$(CC) -std=gnu99 -O1 -Wall -Wextra -o $@ $^
 
+# The temperature, pressure and humidity sensor against a stand-in chip.
+test_bme280: test_bme280.c $(D)/bme280.c
+	$(CC) -std=gnu99 -O1 -Wall -Wextra -Wconversion -Wno-sign-conversion -fsanitize=undefined -o $@ $^ -lm
+
 # The epoch timer catching up after a flash stall.
 test_epoch_resume: test_epoch_resume.c epoch_timer_host.c $(T)/epoch_output.c fake_sfr.c
 	$(CC) -std=gnu99 -O1 -Wall -Wextra -I fake_xc -I $(T) -o $@ $^
@@ -235,6 +240,6 @@ test_esp_report: test_esp_report.c ../../esp/esp_report.c $(U)/timezone.c ../../
 
 clean:
 	rm -f test_spl_writer test_fault test_rtc test_i2c i2c1_host.c test_text test_sync_link test_sources test_monitor pps_monitor_host.c test_utc test_numeric sim_new sim_old test_epoch_scheduler test_acquire test_sync test_console test_gnss test_uart2 test_display test_scheduler test_sml test_boot_layout test_boot test_timezone test_esp_link test_esp_report \
-	      test_store test_settings test_epoch_resume test_brightness test_veml6040 test_controls test_buzzer test_beeps test_alarm test_menu test_set_time buzzer_host.c epoch_timer_host.c uart1_host.c uart2_host.c
+	      test_store test_settings test_epoch_resume test_brightness test_veml6040 test_bme280 test_controls test_buzzer test_beeps test_alarm test_menu test_set_time buzzer_host.c epoch_timer_host.c uart1_host.c uart2_host.c
 
 .PHONY: all clean
