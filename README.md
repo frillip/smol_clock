@@ -42,7 +42,7 @@ The PCF8563 only knows the time to the second, has no trim, and the ones measure
 
 ## Environment sensors
 
-A BME280 temperature/pressure/humidity sensor is on the board, but the firmware does not use it. It may be possible to more accurately estimate the crystal temperature characteristics at startup with this sensor, but for now it is mostly decorative, as there is significant heating of the board from the power supply modules that render it somewhat useless as an environment sensor!
+A BME280 temperature/pressure/humidity sensor is on the board. There is significant heating of the board from the power supply modules, which renders it somewhat useless as an environment sensor, but the board's temperature is still worth having: the firmware reads it once a second and reports it, with pressure and humidity, to set changes in the oscillator's frequency against. It is not used to correct anything.
 
 A VEML6040 is used for ambient light sensing. Its output goes through a very basic scaling to give a target brightness for the tubes out of 4000, which the tubes fade to rather than jump. The PIC then drives a third OC module using this value to get flicker-free brightness control over the tubes. The resulting PWM frequency is 10kHz, with the persistent glow of the VFD phosphor helping to smooth the brightness. This is useful for brightness control, and rather less useful when trying to show exactly when a digit changed.
 

@@ -1048,11 +1048,11 @@ static void test_grammar(void)
         from_pic(SML_CLASS_STAT, SML_STAT_UI, &ui);
         from_pic(SML_CLASS_STAT, SML_STAT_ENV, &env);
         out = run("brightness");
-        CHECK(contains(out, "brightness: AUTO 1520 -> 1600, 50.6 lux; manual 1200"));
+        CHECK(contains(out, "brightness: AUTO 1520 -> 1600, 506 lux; manual 1200"));
         ui.brightness = ui.brightness_target = 100;
         from_pic(SML_CLASS_STAT, SML_STAT_UI, &ui);
         out = run("brightness");
-        CHECK(contains(out, "brightness: AUTO OFF, 50.6 lux"));
+        CHECK(contains(out, "brightness: AUTO OFF, 506 lux"));
     }
     out = run("verbose on");
     CHECK(contains(out, "verbose: ON"));
@@ -1266,6 +1266,50 @@ static void test_text_and_poll(void)
         from_pic(SML_CLASS_STAT, SML_STAT_SYS, &sys);
         out = run("status");
         CHECK(contains(out, "last reset: software"));
+    }
+    printf("Status: the oscillator, Kalman alone and with the loop's integral\n");
+    {
+        SML_TIME_CTRL_PAYLOAD ctrl;
+        std::string out;
+
+        memset(&ctrl, 0, sizeof(ctrl));
+        ctrl.flags = SML_CTRL_ESTIMATE_VALID;
+        ctrl.nominal_period_ticks = 40000000;
+        ctrl.frequency_offset_q16 = 40 * 65536;  // +1 ppm
+        ctrl.pi_integral_q16 = -20 * 65536;      // the loop says 0.5 ppm more
+        ctrl.controller_state = SML_CONTROL_TRACK;
+        from_pic(SML_CLASS_TIME, SML_TIME_CTRL, &ctrl);
+        out = run("status");
+        CHECK(contains(out, "Freq:     +1.0000 ppm (TRACK), loop +1.5000 ppm\n"));
+        ctrl.controller_state = SML_CONTROL_ACQUIRE;
+        from_pic(SML_CLASS_TIME, SML_TIME_CTRL, &ctrl);
+        out = run("status");
+        CHECK(contains(out, "Freq:     +1.0000 ppm (ACQUIRE)\n"));
+    }
+    printf("Status: the BME280, while it has readings\n");
+    {
+        SML_STAT_ENV_PAYLOAD env;
+        std::string out;
+
+        memset(&env, 0, sizeof(env));
+        env.flags = SML_ENV_BME_PRESENT;
+        from_pic(SML_CLASS_STAT, SML_STAT_ENV, &env);
+        out = run("status");
+        CHECK(!contains(out, "Env:"));
+        env.flags = SML_ENV_BME_PRESENT | SML_ENV_BOARD_TEMP_VALID | SML_ENV_TEMP_VALID |
+                    SML_ENV_PRESSURE_VALID | SML_ENV_HUMIDITY_VALID;
+        env.board_temperature_centic = 3441;
+        env.ambient_temperature_centic = 2161;
+        env.pressure_deca_pa = 10128;
+        env.humidity_centipercent = 4821;
+        from_pic(SML_CLASS_STAT, SML_STAT_ENV, &env);
+        out = run("status");
+        CHECK(contains(out, "Env:      board 34.41 C (ambient ~21.61 C), 1012.8 hPa, 48.21 %RH\n"));
+        env.flags = SML_ENV_BME_PRESENT | SML_ENV_BOARD_TEMP_VALID;
+        env.board_temperature_centic = -125;
+        from_pic(SML_CLASS_STAT, SML_STAT_ENV, &env);
+        out = run("status");
+        CHECK(contains(out, "Env:      board -1.25 C\n"));
     }
 }
 

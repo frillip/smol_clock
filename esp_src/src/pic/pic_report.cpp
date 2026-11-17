@@ -179,6 +179,28 @@ static const char *control_name(uint8_t state)
     return state < 4 ? names[state] : "?";
 }
 
+// The Kalman filter's oscillator estimate, in ppm.
+static float kalman_ppm(const SML_TIME_CTRL_PAYLOAD *ctrl)
+{
+    return (float)ctrl->frequency_offset_q16 / 65536.0f / (float)ctrl->nominal_period_ticks * 1e6f;
+}
+
+// While tracking, the loop's best estimate of the oscillator: the Kalman
+// estimate less the PI integral (servo_holdover_offset() on the PIC). On NTP
+// the Kalman estimate is frozen and the integral does the following, so this
+// is the frequency that clock actually runs at. False outside TRACK, where
+// the integral is held but not in use.
+static bool loop_ppm(const SML_TIME_CTRL_PAYLOAD *ctrl, float *ppm)
+{
+    if (ctrl->controller_state != SML_CONTROL_TRACK)
+    {
+        return false;
+    }
+    *ppm = (float)((double)((int64_t)ctrl->frequency_offset_q16 - ctrl->pi_integral_q16) / 65536.0 /
+                   (double)ctrl->nominal_period_ticks * 1e6);
+    return true;
+}
+
 static const char *verdict_name(uint8_t verdict)
 {
     static const char *const names[] = {"-",          "absent",     "no time",      "no edge",
@@ -367,8 +389,13 @@ static void print_sync(Stream *output)
         output->printf("Loop:   %s", control_name(ctrl.controller_state));
         if (ctrl.flags & SML_CTRL_ESTIMATE_VALID)
         {
-            output->printf(", oscillator %+.4f ppm", (float)ctrl.frequency_offset_q16 / 65536.0f /
-                                                         (float)ctrl.nominal_period_ticks * 1e6f);
+            float ppm;
+
+            output->printf(", oscillator %+.4f ppm", kalman_ppm(&ctrl));
+            if (loop_ppm(&ctrl, &ppm))
+            {
+                output->printf(" (%+.4f ppm with the integral)", ppm);
+            }
         }
         output->printf(", %lu gate rejections\n", (unsigned long)ctrl.gate_rejections);
     }
@@ -382,10 +409,14 @@ static void print_oscillator(Stream *output)
     if (pic_link_get(SML_CLASS_TIME, SML_TIME_CTRL, &ctrl, PIC_LINK_STATE_TIMEOUT_MS) &&
         (ctrl.flags & SML_CTRL_ESTIMATE_VALID))
     {
-        output->printf("Freq:     %+.4f ppm (%s)\n",
-                       (float)ctrl.frequency_offset_q16 / 65536.0f /
-                           (float)ctrl.nominal_period_ticks * 1e6f,
-                       control_name(ctrl.controller_state));
+        float ppm;
+
+        output->printf("Freq:     %+.4f ppm (%s)", kalman_ppm(&ctrl), control_name(ctrl.controller_state));
+        if (loop_ppm(&ctrl, &ppm))
+        {
+            output->printf(", loop %+.4f ppm", ppm);
+        }
+        output->printf("\n");
     }
 }
 
@@ -437,6 +468,48 @@ static void print_gnss(Stream *output, bool verbose)
         }
         output->printf("\n");
     }
+}
+
+// 0.01 units as d.dd, signed.
+static void print_centi(Stream *output, int32_t value)
+{
+    uint32_t magnitude = (uint32_t)(value < 0 ? -value : value);
+
+    output->printf("%s%lu.%02lu", value < 0 ? "-" : "", (unsigned long)(magnitude / 100U),
+                   (unsigned long)(magnitude % 100U));
+}
+
+// The BME280 (STAT-ENV), while it has a temperature. It reads the board,
+// which the power supplies warm: the ambient is the PIC's rough guess.
+static void print_env(Stream *output)
+{
+    SML_STAT_ENV_PAYLOAD env;
+
+    if (!pic_link_get(SML_CLASS_STAT, SML_STAT_ENV, &env, 15000U) ||
+        !(env.flags & SML_ENV_BOARD_TEMP_VALID))
+    {
+        return;
+    }
+    output->printf("Env:      board ");
+    print_centi(output, env.board_temperature_centic);
+    output->printf(" C");
+    if (env.flags & SML_ENV_TEMP_VALID)
+    {
+        output->printf(" (ambient ~");
+        print_centi(output, env.ambient_temperature_centic);
+        output->printf(" C)");
+    }
+    if (env.flags & SML_ENV_PRESSURE_VALID)
+    {
+        output->printf(", %u.%u hPa", env.pressure_deca_pa / 10U, env.pressure_deca_pa % 10U);
+    }
+    if (env.flags & SML_ENV_HUMIDITY_VALID)
+    {
+        output->printf(", ");
+        print_centi(output, env.humidity_centipercent);
+        output->printf(" %%RH");
+    }
+    output->printf("\n");
 }
 
 // A bound in the units that suit it, or "-".
@@ -684,6 +757,7 @@ void pic_report_print(Stream *output, bool verbose)
         pic_report_print_sources(output, verbose);
     }
     print_gnss(output, verbose);
+    print_env(output);
     if (verbose)
     {
         print_system(output, true);

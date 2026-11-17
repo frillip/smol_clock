@@ -229,14 +229,17 @@ Telnet:   RUNNING 192.168.1.20:23, [2001:db8:1::20]:23, start-up ON, client 2001
 PIC:      0.1.0, up 00:40:58, last reset: power-on
 UTC:      2026-10-21T10:53:20Z +/-61 ns, GNSS LOCKED
 Local:    2026-10-21T11:53:20+01:00 DST
-Freq:     -3.7500 ppm (TRACK)
+Freq:     -3.7500 ppm (TRACK), loop -3.7412 ppm
 Sync:     LOCKED on GNSS, synchronised
   Source    Verdict            Bound       Phase  Last good
 * GNSS      good              61 ns      +25 ns       0s
 + HOLDOVER  good              86 ns           -      42s
   NTP       good           13.70 ms   -571.0 us       0s
 GNSS:     3D OK, tAcc 12 ns
+Env:      board 34.41 C (ambient ~21.61 C), 1012.8 hPa, 48.21 %RH
 ```
+
+`Freq` is the PIC's Kalman estimate of its oscillator, and while tracking, `loop` is that less the PI integral: what the oscillator is taken to run at. On GNSS the Kalman filter learns the frequency and the integral stays small. On NTP the Kalman estimate is frozen (an NTP epoch is too noisy to learn a frequency from) and the integral does the following, so `loop` is the figure to watch there. `Env` is the PIC's BME280 (STAT-ENV): the board's temperature, which the power supplies warm, the room roughly guessed from it, pressure and humidity.
 
 # Updates
 
@@ -278,7 +281,7 @@ python tools/make_dist.py --config dev --device EC:64:C9:06:D3:50   # dev/EC64C9
 
 `--device` (repeatable) limits a configuration to those clocks, by the Wi-Fi MAC address `wifi -v` prints. It is a configuration of its own, put ahead of the ones without devices so those clocks take it first, but only while their `update config` matches too. Its files go in a folder named after the addresses, inside the config's, so the configuration everyone else takes keeps its own.
 
-[tools/release.py](../tools/release.py) does all of it, and the rest, in one command on Windows or Linux: refuses a working tree with uncommitted changes, runs every host test ([tools/run_tests.py](../tools/run_tests.py)), builds the ESP with arduino-cli and the IPL, SPL and application with MPLAB X's own Makefiles (headless, production, as the IDE builds them), downloads the live manifest so a new configuration is merged into what the clocks see now (not into an older copy left on this machine), runs make_dist.py, uploads with OpenSSH's `sftp` (built into Windows 10 and 11), downloads every file back to check it, and with `--tag v1.2.3` makes a GitHub release of the commit with the files attached (the GitHub CLI, `gh`). The upload puts the files first and the manifest last, beside the old one and renamed over it, so no clock ever reads a manifest that names a file not there yet, or half of one. It takes `--config` and `--device` as make_dist.py does, and `--dry-run` prints what it would do. The machine's own settings (the SSH target, and where arduino-cli and MPLAB X are, if not in their usual places) go in `tools/release.local.json`, which git ignores; the script's own help lists them.
+[tools/release.py](../tools/release.py) does all of it, and the rest, in one command on Windows or Linux: refuses a working tree with uncommitted changes, runs every host test ([tools/run_tests.py](../tools/run_tests.py)), builds the ESP with arduino-cli and the IPL, SPL and application with MPLAB X's own Makefiles (headless, production, as the IDE builds them), downloads the live manifest so a new configuration is merged into what the clocks see now (not into an older copy left on this machine), runs make_dist.py, uploads with OpenSSH's `sftp` (built into Windows 10 and 11), downloads every file back to check it, and with `--tag v1.2.3` makes a GitHub release of the commit with the files attached (the GitHub CLI, `gh`). The upload puts the files first and the manifest last, beside the old one and renamed over it, so no clock ever reads a manifest that names a file not there yet, or half of one. It builds and releases only what is new: each component (the ESP, the PIC application, the SPL) whose version.h differs from the live manifest's entry for the configuration. The others keep their live entries and files, which are downloaded back and checked against the manifest's SHA-256 rather than rebuilt (a rebuild would change the build stamp, and every clock would take it as an update). With nothing new it says so and stops. `--allow-dirty` builds and releases everything, whatever the version headers say, and with uncommitted changes. It takes `--config` and `--device` as make_dist.py does, and `--dry-run` prints what it would do. The machine's own settings (the SSH target, and where arduino-cli and MPLAB X are, if not in their usual places) go in `tools/release.local.json`, which git ignores; the script's own help lists them.
 
 ```
 python tools/release.py --tag v1.0.0                                # tests, builds, prod/, upload, GitHub
@@ -286,6 +289,12 @@ python tools/release.py --config dev --device EC:64:C9:06:D3:50   # one clock's 
 ```
 
 The host tests need make, gcc and g++: on Windows from MSYS2 or WSL. Where they are not, `--skip-tests` leaves them to CI ([.github/workflows/ci.yml](../.github/workflows/ci.yml)), which runs every host test and builds the ESP on every push. The PIC's builds are not in CI: they need MPLAB X and XC16.
+
+[tools/clock_monitor.py](../tools/clock_monitor.py) samples clocks over telnet, for long runs: every minute (`--interval`) it connects, reads the status (an empty line, resent if nothing comes), `ntp tracking`, `ntp gnss`, `osc` and `esp`, disconnects, and appends a CSV row: the PIC's frequency and lock, the oscillator measured and stored, the ESP's frequency, skew, bound and last sample, NTP against GNSS, the longest loop pass, and the BME280's board temperature, pressure and humidity. A file begun by an older version keeps its columns (new ones are left out, with a warning): start a new file for them. `--raw` keeps everything received as well, and `--temp-file` adds a temperature from the monitoring host. It needs no login (every command it uses is open), and leaves telnet free between samples. Python 3, standard library only.
+
+```
+python tools/clock_monitor.py 192.168.3.146 192.168.3.147 --out clocks.csv --raw clocks.log
+```
 
 ## Order
 
@@ -372,7 +381,7 @@ Telnet gets the same commands as the USB-UART console, but on each connection on
 
 The password (`src/net/telnet_auth.cpp`) is kept as a SHA-256 of a random salt and the password, in NVS (namespace `telnet`); until `telnet passwd` sets one, `TELNET_PASSWORD_DEFAULT` stands, and `telnet` shows `DEFAULT PASSWORD`. Five wrong passwords in a row, then each further one locks logins for 30 s, shared by every connection: other commands run meanwhile, and a good login or a new password (from USB-UART, say) clears it. The login lasts until the connection closes.
 
-Telnet gets a copy of all console output, the PIC's included. That copy never blocks: whatever the connection cannot take at once is dropped, and a note saying how much appears in the stream when there is room again. A plain write to a stalled connection waits up to 10 seconds in the network stack, holding up `loop()` (and the PIC link, and TIME-NTP) meanwhile, and after three such failures the Telnet library used to drop the client. Replies to commands typed at Telnet do not block either: what the connection cannot take at once is queued (up to 48 KB, from the heap, freed once sent) and sent as it takes it, and the next command is read once the reply is out. Written straight to the connection, `ntp gnss -v` (about 25 KB) held up `loop()` for seconds: the ESP's PPS ran on by itself, but the TIME-NTP reports and the status LED stopped. The serial console still writes its replies normally.
+Telnet gets a copy of all console output, the PIC's included. That copy never blocks: whatever the connection cannot take at once is dropped, and a note saying how much appears in the stream when there is room again. ESPTelnet's own `flush()` is never used: on the ESP32 it waits for `availableForWrite()` to settle above zero, which NetworkClient never reports, so it ran to its 1 s timeout on every connect and disconnect, holding up `loop()` that long (`src/net/telnet.cpp` overrides it to do nothing). A plain write to a stalled connection waits up to 10 seconds in the network stack, holding up `loop()` (and the PIC link, and TIME-NTP) meanwhile, and after three such failures the Telnet library used to drop the client. Replies to commands typed at Telnet do not block either: what the connection cannot take at once is queued (up to 48 KB, from the heap, freed once sent) and sent as it takes it, and the next command is read once the reply is out. Written straight to the connection, `ntp gnss -v` (about 25 KB) held up `loop()` for seconds: the ESP's PPS ran on by itself, but the TIME-NTP reports and the status LED stopped. The serial console still writes its replies normally.
 
 The status shows the ESP's uptime and why it last started. A restart through the EN pin, which is what a USB-UART's DTR and RTS lines do when a computer opens or closes the port, reports as "power-on or EN pin", so an ESP that restarted while the PIC kept counting epochs was most likely reset that way.
 
