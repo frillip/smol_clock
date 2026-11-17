@@ -795,7 +795,7 @@ static void print_brightness(Stream *output, const SML_SETTINGS_BODY *body)
         if (automatic && pic_link_get(SML_CLASS_STAT, SML_STAT_ENV, &env, 15000U) &&
             (env.flags & SML_ENV_LUX_VALID) != 0)
         {
-            output->printf(", %u.%u lux", env.lux / 10U, env.lux % 10U);
+            output->printf(", %u lux", env.lux); // whole lux
         }
     }
     output->printf("; manual %u\n", body->brightness);
