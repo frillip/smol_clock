@@ -33,6 +33,7 @@ SUITES = [
     ("dspic-app", "dspic_src/tests/host", ["make"]),
     ("release-tools", "dspic_src",
      [PYTHON, "-m", "unittest", "discover", "-s", "tests/tools", "-t", "tests/tools"]),
+    ("monitor", ".", [PYTHON, "-m", "unittest", "discover", "-s", "tools/tests", "-t", "tools/tests"]),
     ("esp-commands", "esp_src/tests/commands", ["make", "test"]),
     ("esp-manifest", "esp_src/tests/manifest", ["make", "test"]),
     ("esp-net", "esp_src/tests/net", ["make", "test"]),

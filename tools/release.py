@@ -9,13 +9,23 @@ In order, stopping at the first failure:
 
  1. The working tree must be clean (--allow-dirty for a test build), so the
     release is a commit, and the tools it needs must be there.
- 2. Every host test (run_tests.py).
- 3. The builds: the ESP with arduino-cli, the IPL, SPL and application with
-    MPLAB X's own Makefiles, headless, as the IDE builds them (production).
- 4. The live manifest downloaded into dist/manifest.json, so the new
+ 2. The live manifest downloaded into dist/manifest.json, so the new
     configuration is merged into what the clocks see now, not into whatever
     an earlier release left on this machine (releases made from two
-    machines would otherwise undo each other's configurations).
+    machines would otherwise undo each other's configurations). Each
+    component's version header (esp_src/src/version.h,
+    dspic_src/platform/version.h, dspic_spl/spl_version.h) is compared with
+    what it offers this configuration: only a component with another
+    version is built and released. The others keep their files and
+    manifest entries as they are, so the clocks are not offered a rebuild of
+    a version they have (another SHA-256, so another download and staging).
+    No new version at all: nothing to do. --allow-dirty (a test build)
+    builds and releases everything, whatever its version.
+ 3. Every host test (run_tests.py).
+ 4. The builds of what is new: the ESP with arduino-cli, the SPL and the
+    application with MPLAB X's own Makefiles, headless, as the IDE builds
+    them (production); a PIC project also when its build is missing, the IPL
+    only when none is released (dspic_ipl/release/).
  5. make_dist.py: the release files and the manifest, as before.
  6. The upload, with OpenSSH's sftp (in Windows 10 and 11, and every Linux
     and macOS): the files first, the manifest last, written beside the old
@@ -59,6 +69,7 @@ TOOLS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(TOOLS, ".."))
 sys.path.insert(0, TOOLS)
 import make_dist  # noqa: E402
+import make_manifest  # noqa: E402
 import run_tests  # noqa: E402
 
 SETTINGS = os.path.join(TOOLS, "release.local.json")
@@ -69,6 +80,14 @@ ESP_FQBN = "esp32:esp32:esp32:FlashSize=16M,PartitionScheme=custom"
 ESP_CORE = "esp32:esp32"
 ESP_CORE_SERIES = "3.3."
 PIC_PROJECTS = ["dspic_ipl", "dspic_spl", "dspic_src"]
+# Each component of a release: the version header it is built from, and the
+# project that builds it.
+COMPONENTS = {
+    "esp": (os.path.join(ROOT, "esp_src", "src", "version.h"), "ESP", None),
+    "pic": (os.path.join(ROOT, "dspic_src", "platform", "version.h"), "PIC", "dspic_src"),
+    "pic_spl": (os.path.join(ROOT, "dspic_spl", "spl_version.h"), "SPL", "dspic_spl"),
+}
+COMPONENT_NAMES = {"esp": "ESP", "pic": "application", "pic_spl": "SPL"}
 WINDOWS = os.name == "nt"
 
 
@@ -205,9 +224,9 @@ def build_esp(settings, dry):
          "--warnings", "default", ESP_SKETCH], dry=dry)
 
 
-def build_pic(settings, dry):
+def build_pic(settings, dry, projects=PIC_PROJECTS):
     generator, make = pic_tools(settings)
-    for project in PIC_PROJECTS:
+    for project in projects:
         folder = os.path.join(ROOT, project)
         # The Makefiles from nbproject/configurations.xml, as the IDE makes them.
         run([generator, "-v", folder + "@default"], dry=dry)
@@ -243,7 +262,7 @@ def live_manifest(base_url, path, dry):
         say("no manifest at %s yet: a new one" % base_url)
         if local is not None and not dry:
             os.remove(path)
-        return
+        return None
     if local is not None and local != live:
         say("dist/manifest.json differed from the live one: the live one is used")
     else:
@@ -252,6 +271,93 @@ def live_manifest(base_url, path, dry):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as handle:
             handle.write(live)
+    return live
+
+
+# ---- Which components have a new version ------------------------------------------
+
+def source_version(path, prefix):
+    """X.Y.Z from a version header's <prefix>_VERSION_MAJOR/MINOR/PATCH."""
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    parts = []
+    for part in ("MAJOR", "MINOR", "PATCH"):
+        match = re.search(r"^#define\s+%s_VERSION_%s\s+(\d+)" % (prefix, part), text, re.M)
+        if not match:
+            raise ReleaseError("%s: no %s_VERSION_%s" % (os.path.relpath(path, ROOT), prefix, part))
+        parts.append(match.group(1))
+    return ".".join(parts)
+
+
+def numeric(version):
+    """The first three numbers of a version string, or None."""
+    found = re.findall(r"\d+", version or "")
+    return tuple(int(part) for part in found[:3]) if len(found) >= 3 else None
+
+
+def live_entry(live, config, devices):
+    """This configuration's entry in the live manifest (its bytes), or None."""
+    if live is None:
+        return None
+    try:
+        manifest = json.loads(live.decode("utf-8"))
+    except ValueError as error:
+        raise ReleaseError("the live manifest: %s" % error)
+    target = {"hardware": "v2", "config": config}
+    if devices:
+        target["devices"] = devices
+    for entry in manifest.get("configurations", []):
+        if make_manifest.same_target(entry, target):
+            return entry
+    return None
+
+
+def changed_components(entry, keys):
+    """For each component, whether its header's version differs from the one
+    the live manifest offers this configuration (or it offers none)."""
+    changed = {}
+    for key in keys:
+        header, prefix, _ = COMPONENTS[key]
+        source = source_version(header, prefix)
+        live = (entry or {}).get(key, {}).get("version")
+        changed[key] = live is None or numeric(source) != numeric(live)
+        if live is None:
+            say("%-12s %s, none offered yet" % (COMPONENT_NAMES[key], source))
+        elif changed[key]:
+            older = numeric(source) < numeric(live)
+            say("%-12s %s, offered %s%s" % (COMPONENT_NAMES[key], source, live,
+                                            ": OLDER, clocks will not take it" if older else ""))
+        else:
+            say("%-12s %s, as offered: kept as it is" % (COMPONENT_NAMES[key], source))
+    return changed
+
+
+def keep_live(manifest_path, config, devices, live, keys, dist, folder):
+    """The live files of unchanged components put back, so their clocks are
+    not offered a rebuild of the same version (another SHA-256, another
+    download): their manifest entries as they were, and the files in dist/
+    as served. The paths of those files, to leave out of the upload."""
+    with open(manifest_path, encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    target = {"hardware": "v2", "config": config}
+    if devices:
+        target["devices"] = devices
+    entry = next(e for e in manifest["configurations"] if make_manifest.same_target(e, target))
+    kept = []
+    for key in keys:
+        entry[key] = live[key]
+        name = live[key]["url"].rsplit("/", 1)[-1]
+        data = fetch(live[key]["url"])
+        if data is None or hashlib.sha256(data).hexdigest() != live[key]["sha256"]:
+            raise ReleaseError("%s: not served as the manifest says: cannot keep it" % live[key]["url"])
+        path = os.path.join(dist, folder, name)
+        with open(path, "wb") as handle:
+            handle.write(data)
+        kept.append(path)
+        say("%-12s %s kept: %s" % (COMPONENT_NAMES[key], live[key]["version"], name))
+    with open(manifest_path, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(manifest, indent=2) + "\n")
+    return kept
 
 
 def verify(base_url, dist, files, manifest):
@@ -347,7 +453,7 @@ def main(argv=None):
     parser.add_argument("--no-esp", action="store_true", help="the PIC's files only")
     parser.add_argument("--no-upload", action="store_true", help="stop after dist/")
     parser.add_argument("--no-verify", action="store_true", help="no download afterwards")
-    parser.add_argument("--allow-dirty", action="store_true", help="uncommitted changes allowed")
+    parser.add_argument("--allow-dirty", action="store_true", help="uncommitted changes allowed, and every component built and released whatever its version")
     parser.add_argument("--dry-run", action="store_true", help="print, run nothing, upload nothing")
     args = parser.parse_args(argv)
     if args.tag and (args.allow_dirty or args.config or args.device):
@@ -365,31 +471,53 @@ def main(argv=None):
         if args.tag:
             need("gh", "the GitHub CLI, for --tag")
 
+        dist_argv = ["--base-url", args.base_url]
+        if args.config:
+            dist_argv += ["--config", args.config]
+        for device in args.device or []:
+            dist_argv += ["--device", device]
+        dist_args = make_dist.parse_args(dist_argv)
+        manifest = os.path.join(dist_args.dist, "manifest.json")
+        devices = sorted(set(make_dist.normal_mac(d) for d in args.device or []))
+
+        # Before the builds: what is new decides what is built.
+        step("2. The live manifest, and what is new")
+        entry = live_entry(live_manifest(dist_args.base_url, manifest, dry), args.config, devices)
+        keys = ["pic", "pic_spl"] + ([] if args.no_esp else ["esp"])
+        changed = changed_components(entry, keys)
+        if args.allow_dirty:
+            # A test build: everything rebuilt and offered, whatever its version.
+            changed = {key: True for key in keys}
+            say("--allow-dirty: every component built and released, whatever its version")
+        elif not any(changed.values()):
+            say("\nnothing to release: every version is the one offered. Raise one in its "
+                "version header, or --allow-dirty to rebuild and release anyway.")
+            return 0
+
         if not args.skip_tests:
-            step("2. Host tests")
+            step("3. Host tests")
             if dry:
                 say("(run_tests.py)")
             elif run_tests.main([]) != 0:
                 raise ReleaseError("host tests failed")
 
         if not args.skip_build:
-            step("3. Builds")
-            if not args.no_esp:
+            step("4. Builds")
+            if "esp" in keys and changed["esp"]:
                 build_esp(settings, dry)
-            build_pic(settings, dry)
+            # A PIC project is built when its version is new, or when its
+            # build is not there for make_dist.py to read; the IPL only when
+            # none is released.
+            projects = []
+            if make_dist.released_ipl() is None:
+                projects.append("dspic_ipl")
+            for key, built in (("pic_spl", make_dist.SPL_HEX), ("pic", make_dist.APP_HEX)):
+                if changed[key] or not os.path.isfile(built):
+                    projects.append(COMPONENTS[key][2])
+            build_pic(settings, dry, [p for p in PIC_PROJECTS if p in projects])
 
-        dist_argv = ["--base-url", args.base_url]
-        if args.config:
-            dist_argv += ["--config", args.config]
-        for device in args.device or []:
-            dist_argv += ["--device", device]
-        if args.no_esp:
-            dist_argv.append("--no-esp")
-        dist_args = make_dist.parse_args(dist_argv)
-        manifest = os.path.join(dist_args.dist, "manifest.json")
-
-        step("4. The live manifest")
-        live_manifest(dist_args.base_url, manifest, dry)
+        if args.no_esp or not changed.get("esp", False):
+            dist_args.no_esp = True  # kept from the live manifest (keep_live), or not released
 
         step("5. dist/")
         if dry:
@@ -402,7 +530,14 @@ def main(argv=None):
             raise ReleaseError("make_dist: %s" % error)
         for path, what in made:
             say("%-44s %s" % (os.path.relpath(path, ROOT), what))
-        files = [path for path, _ in made if os.path.abspath(path) != os.path.abspath(manifest)]
+        unchanged = [key for key in keys if not changed[key]]
+        kept = []
+        if unchanged:
+            folder = os.path.relpath(os.path.dirname(made[0][0]), dist_args.dist)
+            kept = keep_live(manifest, args.config, devices, entry, unchanged, dist_args.dist, folder)
+        kept_paths = set(os.path.abspath(path) for path in kept)
+        files = [path for path, _ in made if os.path.abspath(path) != os.path.abspath(manifest) and
+                 os.path.abspath(path) not in kept_paths]
 
         if args.no_upload:
             say("\nnot uploaded (--no-upload): dist/ is ready")
