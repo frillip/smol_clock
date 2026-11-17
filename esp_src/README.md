@@ -298,7 +298,9 @@ python tools/clock_monitor.py 192.168.3.146 192.168.3.147 --out clocks.csv --raw
 
 ## Order
 
-Newer only, unless forced. The ESP goes first: the PIC's application is only installed by an ESP at or past its configuration's ESP version, so a PIC never runs against an ESP that does not know its SML version. The ESP also checks that the application's SML major version is its own before installing it. The daily check installs the ESP's update and restarts, or else the PIC's.
+Newer only, unless forced. The PIC goes first while the ESP is talking to it: the link is proven, so the ESP running now can update the PIC whatever a new ESP turns out to do. The ESP's update follows once the PIC's have ended, whatever their result, since the ESP can always update itself, link or not. The ESP goes first only when the PIC's updates cannot start: the PIC not heard from, or its application speaking an SML major version the running ESP does not (it checks before installing). The new ESP then installs the PIC's after its restart, from the files staged before it. `update install` and the daily check do all of this in one go.
+
+A PIC update already retries a lost or damaged frame, and makes up to three passes. Should the PIC's updates still fail, they are tried once more, from the same staged files, as soon as the PIC answers again (its application, or its SPL), or after a minute whatever: a PIC that reset or stalled part-way is given a second go before the ESP's update. Not when trying again cannot help: the file is unreadable, made for another device, too large, needs a newer IPL, or the new SPL was rejected. Whatever the outcome, the ESP's update follows, and a PIC update that still failed is tried again at the next `update install` or daily check.
 
 ## The PIC's files
 

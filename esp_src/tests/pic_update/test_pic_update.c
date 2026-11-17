@@ -545,6 +545,7 @@ static void test_refusals(void)
     app_nack = SML_ERROR_STATE;
     run(10000);
     CHECK(update.step == PIC_UPDATE_FAILED && strstr(update.reason, "no usable SPL") != NULL);
+    CHECK(!update.permanent);
     CHECK(in_app);
 
     start_from_app(true, 5000, NEW_VERSION, false);
@@ -567,18 +568,21 @@ static void test_refusals(void)
     pic_update_start(&update, &port, &header, false, false, host_ms);
     run(10000);
     CHECK(update.step == PIC_UPDATE_FAILED && strstr(update.reason, "DEVID") != NULL);
+    CHECK(update.permanent); // trying again cannot help
 
     start_from_app(true, 5000, NEW_VERSION, false);
     header.length = 79874;
     pic_update_start(&update, &port, &header, false, false, host_ms);
     run(10000);
     CHECK(update.step == PIC_UPDATE_FAILED && strstr(update.reason, "fit") != NULL);
+    CHECK(update.permanent);
 
     printf("the new application reports another version\n");
     start_from_app(true, 5000, NEW_VERSION, false);
     app_reports = 0x000999;
     run(60000);
     CHECK(update.step == PIC_UPDATE_FAILED && strstr(update.reason, "0.9.153") != NULL);
+    CHECK(!update.permanent); // worth another try
 
     printf("no answer from the application\n");
     start_from_app(true, 5000, NEW_VERSION, false);

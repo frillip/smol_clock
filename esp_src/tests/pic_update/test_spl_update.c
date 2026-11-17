@@ -753,11 +753,13 @@ int main(void)
         start(true);
         run(10000);
         CHECK(update.step == SPL_UPDATE_FAILED && strstr(update.reason, "DEVID") != NULL);
+        CHECK(update.permanent);
         header = saved;
         header.min_ipl = 0x000200; // needs IPL 0.2.0
         start(true);
         run(10000);
         CHECK(update.step == SPL_UPDATE_FAILED && strstr(update.reason, "IPL") != NULL);
+        CHECK(update.permanent);
         header = saved;
     }
     fresh();
@@ -768,6 +770,7 @@ int main(void)
     start(false);
     run(10000);
     CHECK(update.step == SPL_UPDATE_FAILED && strstr(update.reason, "test page") != NULL);
+    CHECK(update.permanent);
     if (update.step != SPL_UPDATE_FAILED)
     {
         printf("  %s: %s, pic %d\n", spl_update_step_name(update.step), update.reason, (int)pic);

@@ -680,7 +680,8 @@ static void print_epoch(Stream *output, uint32_t epoch, bool local)
     }
 }
 
-// The PIC prints the display as running, the brightness and the controls.
+// The PIC prints the display as running, the brightness, the controls and
+// the alarm.
 static void show_display(Stream *output, bool verbose)
 {
     show_pic(output, SML_SHOW_DISPLAY, verbose);
@@ -988,6 +989,12 @@ static const Entry osc_entries[] = {
 static void bare_gnss(Stream *output, bool verbose)
 {
     show_pic(output, SML_SHOW_GNSS, verbose);
+}
+
+// The PIC's light sensor and BME280.
+static void bare_sensors(Stream *output, bool verbose)
+{
+    show_pic(output, SML_SHOW_SENSORS, verbose);
 }
 
 static void bare_sources(Stream *output, bool verbose)
@@ -1785,6 +1792,7 @@ static const Noun nouns[] = {
     {"rtc", "The RTC", bare_rtc, ENTRIES(rtc_entries)},
     {"osc", "The PIC's oscillator", bare_osc, ENTRIES(osc_entries)},
     {"gnss", "The GNSS receiver", bare_gnss, NO_ENTRIES},
+    {"sensors", "The light sensor and the BME280", bare_sensors, NO_ENTRIES},
     {"sources", "The PIC's time sources, ranked", bare_sources, NO_ENTRIES},
     {"debug", "The PIC's debug output", bare_debug, ENTRIES(debug_entries)},
     {"pic", "The PIC: everything it reports", bare_pic, ENTRIES(pic_entries)},

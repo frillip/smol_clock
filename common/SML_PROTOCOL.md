@@ -6,7 +6,7 @@ SML is the link between the dsPIC33EP256GP504 timekeeper (the **PIC**) and the E
 
 The PIC keeps UTC and disciplines the clock's epoch. The ESP supplies what the PIC cannot get on its own: network time, timezone schedules, leap-second data and user commands. In return the ESP receives the PIC's state for display, logging and statistics, and tells the PIC about its network and services.
 
-This document describes protocol version 2.7 (`SML_PROTOCOL_MAJOR` 2, `SML_PROTOCOL_MINOR` 7) with settings schema 1 (`SML_SETTINGS_SCHEMA`). The definitions live in [sml_proto.h](sml_proto.h), and the reference codec in [sml.c](sml.c) and [sml.h](sml.h), all in `common/` and shared by both firmwares. TIME-AUTH is stable. Every other payload remains provisional until both ends implement it.
+This document describes protocol version 2.8 (`SML_PROTOCOL_MAJOR` 2, `SML_PROTOCOL_MINOR` 8) with settings schema 1 (`SML_SETTINGS_SCHEMA`). The definitions live in [sml_proto.h](sml_proto.h), and the reference codec in [sml.c](sml.c) and [sml.h](sml.h), all in `common/` and shared by both firmwares. TIME-AUTH is stable. Every other payload remains provisional until both ends implement it.
 
 # Physical link
 
@@ -683,13 +683,14 @@ Commands run by the PIC:
 
 | Topic | Name | The V2+ PIC prints |
 | --- | --- | --- |
-| 0 | `SML_SHOW_ALL` | Every module: system, synchroniser, GNSS, display, time zone, settings, RTC, light sensor, brightness, controls, I2C and the ESP link. The ESP sends this at start |
+| 0 | `SML_SHOW_ALL` | Every module: system, synchroniser, time zone, settings, display, RTC, oscillator, sensors, GNSS, I2C and the ESP link. The ESP sends this at start |
 | 1 | `SML_SHOW_STORED` | What is in flash: the settings, the time zone schedule, the oscillator, the store and the flash timings |
 | 2 | `SML_SHOW_TZ` | The offset in force, where it comes from, and the schedule held |
-| 3 | `SML_SHOW_DISPLAY` | The display mode, brightness, light sensor, button and switch |
+| 3 | `SML_SHOW_DISPLAY` | The display mode, brightness, button and switch, and the alarm |
 | 4 | `SML_SHOW_RTC` | The RTC chip, and the RTC source: its second, rate and checks |
 | 5 | `SML_SHOW_OSC` | The oscillator: the stored baseline, the frequency the loop has measured, and what is in flash |
 | 6 | `SML_SHOW_GNSS` | The receiver |
+| 7 | `SML_SHOW_SENSORS` | The light sensor and the BME280 (2.8) |
 
 Running settings, written by CMD-SETTINGS or from the menu, take effect at once and are kept over a reset only once saved (`SAVE`, or CMD-SETTINGS with `SML_WRITE_PERSIST`). STAT-SETTINGS shows `DIRTY` until then. The debug mask (`SET_DEBUG`) is saved with them, though it is not in the settings body and does not change the revision.
 
@@ -1200,6 +1201,7 @@ The timezone architecture document should follow the model described under [TZ-S
 
 | Date | Change |
 | --- | --- |
+| 2026-11-17 (2.8) | `SML_SHOW_SENSORS` (7): the light sensor and the BME280, no longer under `SML_SHOW_DISPLAY`. The V2+ PIC fills STAT-ENV's BME280 fields. No layout change |
 | 2026-11-03 (2.7) | STAT-SYS flag bit 1 `CLOCK_FALLBACK`: the PIC runs from its internal oscillator. BOOT-STATUS `boot` bit `SPL_HUNG` (0x20), and `trials` counts a confirmed SPL's hangs in a row. The BOOT class implemented on both ends. No layout change |
 | 2026-11-03 (2.6) | STAT-SYS flag bit 0 `FAULT` and `fault` (was reserved): a watchdog reset or a trap, as the V2+ PIC records them. No layout change |
 | 2026-11-02 (2.5) | BOOT class (0xF0) defined: BOOT-STATUS (0x01, new), BOOT-COMMAND, BOOT-RESPONSE, BOOT-DATA, BOOT-DATA-RESPONSE, BOOT-VERIFY, BOOT-VERIFY-RESPONSE, with their regions, commands, keys, modes and flags. `SML_ERROR_CRC` (10) and `SML_ERROR_NOT_BLANK` (11). A layout field of any size but 2 or 4 is a byte string. Not implemented yet. No existing layout changes |

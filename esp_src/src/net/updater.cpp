@@ -437,14 +437,12 @@ typedef enum
     PIC_NOT_OFFERED,
     PIC_NOT_HEARD, // the PIC's version is not known
     PIC_CURRENT,
-    PIC_WAITS_FOR_ESP, // newer, but the ESP's update comes first
     PIC_DUE,
 } PicDue;
 
 static PicDue pic_due(const ManifestEntry *entry, bool force, uint32_t *running)
 {
     uint32_t offered;
-    int order = 0;
 
     *running = 0;
     if (!entry->pic.present || !pic_file_version(entry->pic.version, &offered))
@@ -459,11 +457,6 @@ static PicDue pic_due(const ManifestEntry *entry, bool force, uint32_t *running)
     if (!force && offered <= *running)
     {
         return PIC_CURRENT;
-    }
-    if (entry->esp.present && manifest_compare_versions(entry->esp.version, ESP_VERSION, &order) &&
-        order > 0)
-    {
-        return PIC_WAITS_FOR_ESP;
     }
     return PIC_DUE;
 }
@@ -491,7 +484,6 @@ typedef enum
     SPL_NOT_OFFERED,
     SPL_NOT_KNOWN, // no BOOT-STATUS heard: the update's STATUS decides
     SPL_CURRENT,
-    SPL_WAITS_FOR_ESP,
     SPL_DUE,
 } SplDue;
 
@@ -499,17 +491,11 @@ static SplDue spl_due(const ManifestEntry *entry, bool force, uint32_t *running)
 {
     uint32_t offered;
     bool trusted = false;
-    int order = 0;
 
     *running = 0;
     if (!entry->pic_spl.present || !pic_file_version(entry->pic_spl.version, &offered))
     {
         return SPL_NOT_OFFERED;
-    }
-    if (entry->esp.present && manifest_compare_versions(entry->esp.version, ESP_VERSION, &order) &&
-        order > 0)
-    {
-        return SPL_WAITS_FOR_ESP;
     }
     if (!spl_running(running, &trusted))
     {
@@ -664,6 +650,33 @@ static bool app_after_spl;
 static PicStoredFile chained_app;
 static bool chained_force;
 
+// One pass of the PIC's updates ("update install", the daily check, after an
+// ESP update's restart): its files, what was started, and a second try. A
+// pass that ends in failure is tried once more, once the PIC answers again
+// (its application or its SPL), or after PASS_WAIT_MS whatever: the first
+// pass's own retries cover a lost frame, this covers a PIC that reset or
+// stalled part-way. Not after a failure trying again cannot help
+// (pic_boot_outcome() PERMANENT).
+#define PASS_TRIES   2U
+#define PASS_WAIT_MS 60000U
+
+typedef struct
+{
+    bool active;     // started, and not yet judged
+    bool waiting;    // judged a failure: to try again
+    uint8_t tries;   // passes started
+    uint32_t failed_ms;
+    bool have_spl;
+    bool have_app;
+    PicStoredFile spl_file;
+    PicStoredFile app_file;
+    bool spl_started;
+    bool app_wanted;  // the application is to be installed in this pass
+    bool app_started; // ... and its update started
+} PicPass;
+
+static PicPass pass;
+
 // An application file installed, run by pic_boot. An SPL that the
 // application last reported missing, rejected or unconfirmed is installed
 // again first, and the application chained after it. False, said why, if
@@ -683,7 +696,12 @@ static bool start_app(const PicStoredFile *file, bool force, Stream *output)
         output->printf("PIC update: the application follows the SPL\n");
         return true;
     }
-    return pic_boot_update(file, force, output);
+    if (!pic_boot_update(file, force, output))
+    {
+        return false;
+    }
+    pass.app_started = true;
+    return true;
 }
 
 
@@ -751,34 +769,61 @@ static void stage_offered_spl(const ManifestEntry *entry, Stream *output);
 
 // The PIC's files, staged: an SPL update, then the application chained
 // after it if it is newer than the one the PIC runs; else the application
-// alone if newer. Either may be absent.
-static void pic_updates_from(const PicStoredFile *spl_file, const PicStoredFile *app_file,
-                             Stream *output)
+// alone if newer. Either may be absent. One pass (PicPass).
+static void pass_run(Stream *output)
 {
+    const PicStoredFile *spl_file = pass.have_spl ? &pass.spl_file : NULL;
+    const PicStoredFile *app_file = pass.have_app ? &pass.app_file : NULL;
+
+    pass.tries++;
+    pass.waiting = false;
+    pass.spl_started = false;
+    pass.app_wanted = false;
+    pass.app_started = false;
     note_pic();
     if (spl_file != NULL && pic_boot_update_spl(spl_file, false, output))
     {
+        pass.spl_started = true;
         if (app_file != NULL)
         {
             chained_app = *app_file;
             chained_force = false;
             app_after_spl = true;
+            pass.app_wanted = true;
         }
-        return;
     }
-    if (app_file == NULL)
+    else if (app_file == NULL)
     {
-        return;
+        // nothing more
     }
-    if (pic_heard && app_file->header.version <= pic_version_heard)
+    else if (pic_heard && app_file->header.version <= pic_version_heard)
     {
         output->printf("PIC: the application staged is not newer than the one it runs\n");
-        return;
     }
-    if (pic_compatible(app_file, output))
+    else if (pic_compatible(app_file, output))
     {
+        pass.app_wanted = true;
         (void)start_app(app_file, false, output);
     }
+    pass.active = pass.spl_started || pass.app_wanted;
+}
+
+
+static void pic_updates_from(const PicStoredFile *spl_file, const PicStoredFile *app_file,
+                             Stream *output)
+{
+    memset(&pass, 0, sizeof(pass));
+    if (spl_file != NULL)
+    {
+        pass.spl_file = *spl_file;
+        pass.have_spl = true;
+    }
+    if (app_file != NULL)
+    {
+        pass.app_file = *app_file;
+        pass.have_app = true;
+    }
+    pass_run(output);
 }
 
 
@@ -826,11 +871,18 @@ static bool pic_wanted(const ManifestEntry *entry)
 }
 
 
-// Often: the application's update once the SPL's has ended.
-static void chain_service(void)
+// The ESP's update after the PIC's (PIC first, install_due()): its entry,
+// once no PIC update runs or is chained.
+static bool esp_after_pic;
+static ManifestEntry chained_esp;
+
+static void install_esp_reported(Stream *output, const ManifestEntry *entry, bool restart,
+                                 bool then_pic);
+
+// The application's update once the SPL's has ended.
+static void chain_app(Stream *output)
 {
     bool done = false;
-    Stream *output = console_stream();
 
     if (!app_after_spl || pic_boot_updating())
     {
@@ -846,11 +898,86 @@ static void chain_service(void)
     if (!chained_force && pic_heard && chained_app.header.version <= pic_version_heard)
     {
         console_printf("PIC: the application is up to date\n");
+        pass.app_wanted = false;
         return;
     }
-    if (pic_compatible(&chained_app, output))
+    if (pic_compatible(&chained_app, output) &&
+        pic_boot_update(&chained_app, chained_force, output))
     {
-        (void)pic_boot_update(&chained_app, chained_force, output);
+        pass.app_started = true;
+    }
+}
+
+
+// A pass's outcome once nothing of it runs: what it started done, else tried
+// again once (PicPass).
+static void pass_service(Stream *output)
+{
+    PicBootOutcome outcome;
+    bool failed = false;
+    bool permanent = false;
+
+    if (!pass.active || app_after_spl || pic_boot_updating())
+    {
+        return;
+    }
+    if (!pass.waiting)
+    {
+        if (pass.spl_started)
+        {
+            outcome = pic_boot_outcome(true);
+            failed = outcome != PIC_BOOT_OUTCOME_DONE;
+            permanent = outcome == PIC_BOOT_OUTCOME_PERMANENT;
+        }
+        if (pass.app_wanted && !permanent)
+        {
+            outcome = pass.app_started ? pic_boot_outcome(false) : PIC_BOOT_OUTCOME_FAILED;
+            failed = failed || outcome != PIC_BOOT_OUTCOME_DONE;
+            permanent = outcome == PIC_BOOT_OUTCOME_PERMANENT;
+        }
+        if (!failed)
+        {
+            pass.active = false;
+            return;
+        }
+        if (permanent || pass.tries >= PASS_TRIES)
+        {
+            pass.active = false;
+            console_printf(permanent ? "PIC update: not tried again: the same file cannot do better\n"
+                                     : "PIC update: failed again: \"update install\" or the next "
+                                       "daily check tries once more\n");
+            return;
+        }
+        pass.waiting = true;
+        pass.failed_ms = millis();
+        console_printf("PIC update: trying once more, once the PIC answers (%u s at most)\n",
+                       PASS_WAIT_MS / 1000U);
+        return;
+    }
+    note_pic();
+    if (!pic_heard && millis() - pass.failed_ms < PASS_WAIT_MS)
+    {
+        return;
+    }
+    console_printf(pic_heard ? "PIC update: the PIC answers: trying again\n"
+                             : "PIC update: the PIC is silent: trying again anyway\n");
+    pass_run(output);
+}
+
+
+// Often: the application's update once the SPL's has ended, a failed pass
+// tried again, and the ESP's update once the PIC's have ended.
+static void chain_service(void)
+{
+    Stream *output = console_stream();
+
+    chain_app(output);
+    pass_service(output);
+    if (esp_after_pic && !app_after_spl && !pic_boot_updating() && !pass.active)
+    {
+        esp_after_pic = false;
+        console_printf("Update: the PIC's updates have ended: the ESP's next\n");
+        install_esp_reported(output, &chained_esp, true, false);
     }
 }
 
@@ -1005,9 +1132,6 @@ static void print_offers(Stream *output, const ManifestEntry *entry)
         pic_report_version(text, sizeof(text), running);
         output->printf("PIC: %s offered, up to date (%s)\n", entry->pic.version, text);
         break;
-    case PIC_WAITS_FOR_ESP:
-        output->printf("PIC: %s offered, after the ESP's update\n", entry->pic.version);
-        break;
     case PIC_DUE:
         pic_report_version(text, sizeof(text), running);
         output->printf("PIC: %s offered, UPDATE AVAILABLE (runs %s)\n", entry->pic.version,
@@ -1024,9 +1148,6 @@ static void print_offers(Stream *output, const ManifestEntry *entry)
     case SPL_CURRENT:
         pic_report_version(text, sizeof(text), running);
         output->printf("SPL: %s offered, up to date (%s)\n", entry->pic_spl.version, text);
-        break;
-    case SPL_WAITS_FOR_ESP:
-        output->printf("SPL: %s offered, after the ESP's update\n", entry->pic_spl.version);
         break;
     case SPL_DUE:
         pic_report_version(text, sizeof(text), running);
@@ -1072,21 +1193,41 @@ static void check_and_stage(const ManifestEntry *entry, Stream *output)
 }
 
 
-static void install_esp_reported(Stream *output, const ManifestEntry *entry, bool restart,
-                                 bool then_pic);
-
-// Everything due, after check_and_stage(): the ESP's, restarting at once,
-// with the PIC's to follow from the staged files; else the PIC's.
+// Everything due, after check_and_stage(). The PIC first while this ESP is
+// talking to it (heard from, in its application or its SPL): the link is
+// proven, and this ESP can update the PIC whatever the new ESP turns out to
+// do. Then the ESP's, chained once the PIC's have ended (chain_service()),
+// whatever their result: the ESP can always update itself. The ESP first
+// only when the PIC's could not start (not heard from, its file not staged,
+// or the application speaking an SML major this ESP does not): then the
+// PIC's follow the restart, from the staged files, installed by the new ESP.
 static void install_due(const ManifestEntry *entry, Stream *output)
 {
-    if (esp_due(entry, false))
+    bool esp = esp_due(entry, false);
+
+    if (pic_wanted(entry) && pic_heard)
+    {
+        pic_updates(entry, output);
+        if (!esp)
+        {
+            return;
+        }
+        if (pass.active)
+        {
+            chained_esp = *entry;
+            esp_after_pic = true;
+            output->printf("ESP: %s follows the PIC's updates\n", entry->esp.version);
+            return;
+        }
+    }
+    if (esp)
     {
         install_esp_reported(output, entry, true, true);
         return;
     }
     if (pic_wanted(entry))
     {
-        pic_updates(entry, output);
+        pic_updates(entry, output); // not heard from: SPL_NOT_KNOWN, or forced
         return;
     }
     output->printf("Update: nothing to install\n");
@@ -1164,7 +1305,7 @@ void updater_pull(Stream *output)
     ManifestEntry entry;
 
     print_version(output);
-    if (pic_boot_updating() || app_after_spl || resuming)
+    if (pic_boot_updating() || app_after_spl || resuming || esp_after_pic || pass.active)
     {
         output->printf("Update: the PIC's updates are under way\n");
         return;
@@ -1221,9 +1362,6 @@ void updater_spl(Stream *output, bool force)
         output->printf("SPL: up to date (force to install it again)\n");
         stage_offered_spl(&entry, output);
         break;
-    case SPL_WAITS_FOR_ESP:
-        output->printf("SPL: the ESP's update first (%s)\n", entry.esp.version);
-        break;
     }
 }
 
@@ -1246,9 +1384,6 @@ void updater_pic(Stream *output, bool force)
     case PIC_CURRENT:
         output->printf("PIC: up to date (force to install it again)\n");
         stage_offered(&entry, output);
-        break;
-    case PIC_WAITS_FOR_ESP:
-        output->printf("PIC: the ESP's update first (%s)\n", entry.esp.version);
         break;
     }
 }
@@ -1349,7 +1484,7 @@ void updater_service(bool have_local, uint32_t local_seconds)
     }
     if (!user_prefs.fields.updater.flags.auto_enabled || checked_day == day ||
         hour != user_prefs.fields.updater.flags.auto_time || pic_boot_updating() || app_after_spl ||
-        resuming)
+        resuming || esp_after_pic || pass.active)
     {
         return;
     }
@@ -1378,5 +1513,6 @@ bool updater_pic_is_available(void)
 
 bool updater_is_running(void)
 {
-    return running || pic_boot_updating() || app_after_spl || resuming;
+    return running || pic_boot_updating() || app_after_spl || resuming || esp_after_pic ||
+           pass.active;
 }

@@ -739,6 +739,7 @@ static void test_pic_actions(void)
         {"rtc", SML_USER_SHOW, SML_SHOW_RTC},
         {"osc", SML_USER_SHOW, SML_SHOW_OSC},
         {"gnss", SML_USER_SHOW, SML_SHOW_GNSS},
+        {"sensors", SML_USER_SHOW, SML_SHOW_SENSORS},
         {"sources", SML_USER_REQUEST_MESSAGE, (uint32_t)SML_CLASS_STAT << 8 | SML_STAT_SOURCES},
         {"pic save", SML_USER_SAVE, 0},
         {"pic defaults", SML_USER_DEFAULTS, 0},

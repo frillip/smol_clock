@@ -61,6 +61,14 @@ static void fail(PicUpdate *u, const char *reason)
 }
 
 
+// A failure that trying again cannot cure: the file, or the PIC it is for.
+static void fail_permanent(PicUpdate *u, const char *reason)
+{
+    fail(u, reason);
+    u->permanent = true;
+}
+
+
 static void fail_nack(PicUpdate *u, const char *what, uint16_t detail)
 {
     char text[64];
@@ -166,7 +174,7 @@ static bool next_chunk(PicUpdate *u)
         }
         if (!readable)
         {
-            fail(u, "the staged image cannot be read");
+            fail_permanent(u, "the staged image cannot be read");
             return false;
         }
     }
@@ -312,18 +320,18 @@ static void status_checked(PicUpdate *u)
     }
     if (u->status[4] != SML_BOOT_PROTOCOL)
     {
-        fail(u, "the SPL speaks another bootloader protocol");
+        fail_permanent(u, "the SPL speaks another bootloader protocol");
         return;
     }
     if (status_u32(u, 12) != u->image.device_id)
     {
-        fail(u, "the PIC is not the device the image is for (DEVID)");
+        fail_permanent(u, "the PIC is not the device the image is for (DEVID)");
         return;
     }
     if (status_u32(u, 16) != u->image.start ||
         status_u32(u, 20) < u->image.start + 2U * u->image.length)
     {
-        fail(u, "the image does not fit the PIC's application region");
+        fail_permanent(u, "the image does not fit the PIC's application region");
         return;
     }
     if ((flags & SML_BOOT_FLAG_IMAGE_OK) != 0U && status_u32(u, 24) == u->image.version &&

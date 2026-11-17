@@ -68,7 +68,7 @@
 #define SML_TZ_TRANSITION_MAX 8U
 #define SML_SETTINGS_SCHEMA   1U
 #define SML_PROTOCOL_MAJOR    2U
-#define SML_PROTOCOL_MINOR    7U
+#define SML_PROTOCOL_MINOR    8U
 
 #define SML_CLASS_TIME 0x10U
 #define SML_CLASS_TZ   0x20U
@@ -1051,11 +1051,12 @@ typedef struct
 #define SML_SHOW_ALL     0U // every module (the ESP sends this at start)
 #define SML_SHOW_STORED  1U // the settings, schedule and oscillator in flash, and the store
 #define SML_SHOW_TZ      2U // the time zone in force and the schedule held
-#define SML_SHOW_DISPLAY 3U // display, brightness, light sensor, button and switch
+#define SML_SHOW_DISPLAY 3U // display, brightness, button and switch, alarm
 #define SML_SHOW_RTC     4U // the RTC and the RTC source
 #define SML_SHOW_OSC     5U // the oscillator: running, measured and stored
 #define SML_SHOW_GNSS    6U // the receiver
-#define SML_SHOW_COUNT   7U
+#define SML_SHOW_SENSORS 7U // the light sensor and the BME280 (2.8)
+#define SML_SHOW_COUNT   8U
 // With a topic: everything, the counters and internals included.
 #define SML_SHOW_VERBOSE 0x0100U
 

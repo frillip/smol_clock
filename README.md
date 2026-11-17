@@ -140,7 +140,7 @@ Over Telnet, anything that changes something needs `telnet login <password>` fir
 
 The [ESP updater](esp_src/src/net/updater.cpp) pulls firmware over WiFi from an HTTPS update manifest, `/smol_clock/v2plus/manifest.json` by default. The hostname and path of the manifest are configurable. An optional configuration string selects an update profile, for example `development`, with `default` clearing that selection. The manifest names the ESP's image and the PIC's application for each configuration, each with its version, size and SHA-256 (the [ESP README](esp_src/README.md#updates) has the format).
 
-`update check` checks what is available for both chips without installing anything. `update install` checks first, as `update check` does, staging the PIC's files, then installs everything due in one go: the ESP's if it is newer, restarting the ESP at once, then the PIC's bootloader (its SPL), then the PIC's application. After the restart the ESP carries on by itself from the staged files as soon as the PIC answers, without waiting for the network, and reports on the serial console and any telnet client that has reconnected. A clock that should not take every version offered is given a configuration of its own (`update config`). Each part also has its own command: `update esp` (newer only, finished by `esp reset`), `update esp force` (whatever version is offered, the running one included, and an immediate restart: useful when testing, though somewhat more committed than merely checking), `update pic` and `update pic force`, and `update spl` and `update spl force` for the PIC's bootloader (its SPL).
+`update check` checks what is available for both chips without installing anything. `update install` checks first, as `update check` does, staging the PIC's files, then installs everything due in one go: the PIC's bootloader (its SPL), then the PIC's application, then the ESP's, restarting the ESP at once. The PIC goes first because the link to it is known to work with the ESP running now, and the ESP can always update itself, link or not. Only when the PIC's updates cannot start (the PIC not heard from, or a new application the running ESP cannot talk to) does the ESP go first, carrying on by itself after the restart from the staged files as soon as the PIC answers, without waiting for the network, and reporting on the serial console and any telnet client that has reconnected. A clock that should not take every version offered is given a configuration of its own (`update config`). Each part also has its own command: `update esp` (newer only, finished by `esp reset`), `update esp force` (whatever version is offered, the running one included, and an immediate restart: useful when testing, though somewhat more committed than merely checking), `update pic` and `update pic force`, and `update spl` and `update spl force` for the PIC's bootloader (its SPL).
 
 The PIC's application goes in through its bootloader: the ESP stages the file in its own flash, puts the PIC in its bootloader, writes and reads back the image, and only then commits it. A failed or interrupted update can leave the PIC in its bootloader without an application. After 30 s the ESP installs the staged file again by itself, without the network. The ESP also stages the application the manifest offers, fetched by `update check` when no slot holds it, so `update pic force` can reinstall it offline. `update` lists the staged files and `update erase pic|spl|all` empties them. `pic boot` shows what the bootloader reports, `pic boot run` starts the application, and `pic boot hold` keeps the PIC in its bootloader.
 
@@ -218,7 +218,7 @@ Values are written as people write them: on/off (or 1/0, yes/no), offsets as `+5
 | `tz server <host>`, `tz path <path>` | The tzinfo service |
 | `tz interval <time>` | Time between lookups, 15m–7d, default 1d |
 | `tz precision none\|0..6` | Decimal places of position sent, see [Location privacy](#location-privacy) |
-| `display [-v]` | The display mode, 12/24 hours, brightness, light sensor, button and switch |
+| `display [-v]` | The display mode, 12/24 hours, brightness, button and switch, and the alarm |
 | `display hhmm\|mmss\|ssmm\|yyyy\|mmdd\|delta\|uncertainty` | The display mode, the button steps through them for 20 seconds. `uncertainty` shows the time's ± bound (` 89n`, ` 1.5u`, `12.6m`) |
 | `display hours 12\|24` | 12- or 24-hour clock |
 | `display epoch <moment>` | The reference for the delta mode: a date and time without a zone is local time (`2027-01-01 00:00`), with `Z`, an offset or as Unix seconds, an exact instant |
@@ -230,6 +230,7 @@ Values are written as people write them: on/off (or 1/0, yes/no), offsets as `+5
 | `osc` | The oscillator: the baseline setting, the loop's measured frequency, and what is stored |
 | `osc baseline <Hz>` | The oscillator baseline setting, within 1000ppm of 40MHz |
 | `gnss` | The GNSS receiver |
+| `sensors` | The light sensor and the BME280: lux, the board's temperature, pressure and humidity |
 | `sources [-v]` | The PIC's time sources, ranked |
 | `debug [names\|+name -name]` | The PIC's debug output: show it, set exactly these, or add and remove. Names are `timing`, `gnss`, `sync`, `sources`, `ntp`, `minute`, `tuning`, `rtc`, `events`, `all` and `none`, or a mask such as `0x1f` |
 | `pic [-v]` | Everything the PIC reports |
@@ -265,7 +266,7 @@ Values are written as people write them: on/off (or 1/0, yes/no), offsets as `+5
 | `telnet passwd <password>` | Set the Telnet password, 4–64 characters (stored hashed) |
 | `update [-v]` | The running version, the staged files (`-v` the SPL's too), the update server and the automatic update setting |
 | `update check` | What is offered for the ESP and the PIC. Also stages the PIC's application and SPL offered if no slot holds them |
-| `update install` | `update check`, then everything due in one go: the ESP's (restarting at once), then the PIC's SPL, then its application, from the staged files |
+| `update install` | `update check`, then everything due in one go: the PIC's SPL, then its application, from the staged files, then the ESP's (restarting at once) |
 | `update esp [force]` | The ESP's image if newer (finished by `esp reset`). `force` installs whatever version is offered and restarts |
 | `update pic [force]` | The PIC's application if newer. `force` any version, from the staged file when the update server cannot be reached |
 | `update spl [force]` | The PIC's SPL if newer, through its application, tested and confirmed (about two minutes). `force` any version, from the staged file when the update server cannot be reached |

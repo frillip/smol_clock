@@ -1020,10 +1020,11 @@ int main(void)
         } topics[] = {
             {SML_SHOW_STORED, "stored "},
             {SML_SHOW_TZ, ""},                                      // timezone.c itself, to stdout
-            {SML_SHOW_DISPLAY, "brightness light env controls alarm "}, // the counters: verbose
+            {SML_SHOW_DISPLAY, "brightness controls alarm "}, // the counters: verbose
             {SML_SHOW_RTC, "pcf8563 rtc-source "},
             {SML_SHOW_OSC, "oscillator "},
             {SML_SHOW_GNSS, "gnss "},
+            {SML_SHOW_SENSORS, "light env "},
         };
         size_t index;
 
@@ -1036,13 +1037,15 @@ int main(void)
         }
         printed[0] = '\0';
         CHECK(esp_report_show(SML_SHOW_DISPLAY, true, 1000) &&
-              strcmp(printed, "display brightness light env controls alarm ") == 0);
+              strcmp(printed, "display brightness controls alarm ") == 0);
         printed[0] = '\0';
         CHECK(!esp_report_show(SML_SHOW_ALL, false, 1000) &&
               !esp_report_show(SML_SHOW_COUNT, false, 1000) && printed[0] == '\0');
         esp_report_print_all(1000, false);
         CHECK(strstr(printed, "settings") != NULL && strstr(printed, "rtc-source") != NULL &&
               strstr(printed, "oscillator") != NULL && strstr(printed, "display") == NULL);
+        // The sensors after the oscillator, before the receiver.
+        CHECK(strstr(printed, "oscillator light env gnss") != NULL);
     }
 
     test_boot_report();

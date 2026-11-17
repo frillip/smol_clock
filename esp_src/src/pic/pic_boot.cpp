@@ -346,6 +346,33 @@ bool pic_boot_spl_result(bool *done)
 }
 
 
+PicBootOutcome pic_boot_outcome(bool spl_update)
+{
+    if (spl_update)
+    {
+        if (!spl_started || spl_update_running(&spl))
+        {
+            return PIC_BOOT_OUTCOME_NONE;
+        }
+        // After a rejection, the update that ended is the put-back's.
+        if (spl_reinstall || spl.step == SPL_UPDATE_REJECTED || spl.permanent)
+        {
+            return PIC_BOOT_OUTCOME_PERMANENT;
+        }
+        return spl.step == SPL_UPDATE_DONE ? PIC_BOOT_OUTCOME_DONE : PIC_BOOT_OUTCOME_FAILED;
+    }
+    if (!started || pic_update_running(&update))
+    {
+        return PIC_BOOT_OUTCOME_NONE;
+    }
+    if (update.step == PIC_UPDATE_DONE)
+    {
+        return PIC_BOOT_OUTCOME_DONE;
+    }
+    return update.permanent ? PIC_BOOT_OUTCOME_PERMANENT : PIC_BOOT_OUTCOME_FAILED;
+}
+
+
 static void report(void)
 {
     uint8_t now_quarter;

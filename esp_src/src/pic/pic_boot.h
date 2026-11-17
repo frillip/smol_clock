@@ -43,6 +43,20 @@ bool pic_boot_updating(void);
 // False while one runs, or if none has.
 bool pic_boot_spl_result(bool *done);
 
+// How the last application update (spl false) or SPL update (spl true) since
+// the ESP started ended. PERMANENT: trying the same file again cannot help
+// (the file, the PIC's device or IPL; for the SPL, a new SPL rejected, the
+// one put back included). NONE while one runs, or if none has.
+typedef enum
+{
+    PIC_BOOT_OUTCOME_NONE = 0,
+    PIC_BOOT_OUTCOME_DONE,
+    PIC_BOOT_OUTCOME_FAILED,
+    PIC_BOOT_OUTCOME_PERMANENT,
+} PicBootOutcome;
+
+PicBootOutcome pic_boot_outcome(bool spl_update);
+
 // "pic boot": where the PIC is (its application, or its SPL and what the
 // SPL reports), and the last update.
 void pic_boot_print(Stream *output, bool verbose);

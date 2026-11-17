@@ -70,6 +70,7 @@ typedef struct
     PicUpdateStep step;
     bool already; // the image was there already: only run
     char reason[96];
+    bool permanent; // FAILED: the PIC cannot take this image, whatever is tried again
     uint32_t now;
     // The request in flight.
     uint16_t token;

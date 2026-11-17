@@ -857,7 +857,9 @@ static Pcf8563Reference rtc_reference(void)
 }
 
 
-// The display as set and as running: the mode, the clock, the delta epoch.
+// The display as set and as running (the mode, the clock, the delta epoch),
+// its brightness, and the rest of the clock's face: the button and switch,
+// the alarm.
 static void print_display(bool verbose, uint32_t now_ms)
 {
     printf("Display: %s", display_mode_name(display_mode()));
@@ -880,10 +882,6 @@ static void print_display(bool verbose, uint32_t now_ms)
     printf("  ");
     brightness_print(verbose);
     printf("  ");
-    veml6040_print(now_ms, verbose);
-    printf("  ");
-    bme280_print(now_ms, verbose);
-    printf("  ");
     controls_print(verbose);
     printf("  ");
     alarm_print(verbose);
@@ -903,6 +901,10 @@ bool esp_report_show(uint32_t topic, bool verbose, uint32_t now_ms)
             return true;
         case SML_SHOW_OSC: settings_print_oscillator(verbose); return true;
         case SML_SHOW_GNSS: gnss_print(now_ms, verbose); return true;
+        case SML_SHOW_SENSORS:
+            veml6040_print(now_ms, verbose);
+            bme280_print(now_ms, verbose);
+            return true;
         default: return false;
     }
 }
@@ -917,6 +919,8 @@ void esp_report_print_all(uint32_t now_ms, bool verbose)
     (void)esp_report_show(SML_SHOW_DISPLAY, verbose, now_ms);
     (void)esp_report_show(SML_SHOW_RTC, verbose, now_ms);
     settings_print_oscillator(verbose);
+    // The sensors beside the oscillator: its frequency follows the temperature.
+    (void)esp_report_show(SML_SHOW_SENSORS, verbose, now_ms);
     gnss_print(now_ms, verbose);
     if (verbose)
     {

@@ -79,6 +79,14 @@ static void fail(SplUpdate *u, const char *reason)
 }
 
 
+// A failure that trying again cannot cure: the file, or the PIC it is for.
+static void fail_permanent(SplUpdate *u, const char *reason)
+{
+    fail(u, reason);
+    u->permanent = true;
+}
+
+
 static void reject(SplUpdate *u, const char *reason)
 {
     snprintf(u->reason, sizeof(u->reason), "%s", reason);
@@ -248,7 +256,7 @@ static bool next_chunk(SplUpdate *u)
         }
         if (!readable)
         {
-            fail(u, "the staged SPL cannot be read");
+            fail_permanent(u, "the staged SPL cannot be read");
             return false;
         }
     }
@@ -463,22 +471,22 @@ static void status_checked(SplUpdate *u)
     }
     if (u->status[4] != SML_BOOT_PROTOCOL)
     {
-        fail(u, "the application speaks another bootloader protocol");
+        fail_permanent(u, "the application speaks another bootloader protocol");
         return;
     }
     if (status_u32(u, 12) != u->image.device_id)
     {
-        fail(u, "the PIC is not the device the SPL is for (DEVID)");
+        fail_permanent(u, "the PIC is not the device the SPL is for (DEVID)");
         return;
     }
     if (((uint32_t)ipl << 8) < (u->image.min_ipl & 0xFFFF00UL))
     {
-        fail(u, "the PIC's IPL is older than the SPL needs");
+        fail_permanent(u, "the PIC's IPL is older than the SPL needs");
         return;
     }
     if ((flags & SML_BOOT_FLAG_TEST_FREE) == 0U)
     {
-        fail(u, "the application reaches the test page: the SPL cannot be tested");
+        fail_permanent(u, "the application reaches the test page: the SPL cannot be tested");
         return;
     }
     if (is_running_spl(u) && (boot & SML_BOOT_PATH_APP_DIRECT) == 0U && !u->force)

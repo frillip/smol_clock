@@ -105,6 +105,7 @@ typedef struct
     bool kept;        // the running SPL was kept as a staged file
     bool test_failed; // the new SPL failed its test: RUN, then REJECTED
     char reason[96];
+    bool permanent; // FAILED: the PIC cannot take this SPL, whatever is tried again
     uint32_t now;
     uint16_t token;
     uint16_t next_token;
