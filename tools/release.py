@@ -4,6 +4,23 @@
   release.py [--config NAME] [--device MAC ...] [--tag vX.Y.Z]
              [--skip-tests] [--skip-build] [--no-esp] [--no-upload]
              [--no-verify] [--allow-dirty] [--dry-run]
+  release.py --check-tag TAG [--no-ci-check]
+  release.py --from-tag TAG [--no-ci-check]
+
+Tags (the CI on caesium, .github/workflows/release.yml, runs these):
+
+  vX.Y.Z-test  a test release: the ESP's and the application's version
+               headers must say X.Y.Z, HEAD must be the tag; released to the
+               "dev" configuration only, no GitHub release.
+  vX.Y.Z       a release: as above, and promoted from a test: the newest
+               vA.B.C-test tag before it (an ancestor, A.B.C lower) differs
+               from it in the version headers alone, its CI run succeeded
+               (the release workflow, by its commit: the GitHub CLI, unless
+               --no-ci-check), and the commit is on origin/master. Released
+               to the default configuration, and a GitHub release of it.
+
+--check-tag runs those checks alone (the workflow's first job, before the
+manual approval); --from-tag runs them and then the release.
 
 In order, stopping at the first failure:
 
@@ -78,7 +95,10 @@ import make_manifest  # noqa: E402
 import run_tests  # noqa: E402
 import upload_dist  # noqa: E402
 
-SETTINGS = os.path.join(TOOLS, "release.local.json")
+# On the CI machine the settings live outside the checkout.
+SETTINGS = os.environ.get("SMOL_RELEASE_SETTINGS") or os.path.join(TOOLS, "release.local.json")
+VERSION_HEADERS = ["esp_src/src/version.h", "dspic_src/platform/version.h", "dspic_spl/spl_version.h"]
+RELEASE_WORKFLOW = "release.yml"
 ESP_SKETCH = os.path.join(ROOT, "esp_src")
 ESP_LIBRARIES = os.path.join(ESP_SKETCH, "libraries")
 # ESP32 Dev Module, 16MB flash, the Custom partition scheme (partitions.csv).
@@ -401,6 +421,99 @@ def github_release(tag, commit, files, dry):
         + files, dry=dry)
 
 
+# ---- Tags (CI) ------------------------------------------------------------------
+
+TAG = re.compile(r"^v(\d+)\.(\d+)\.(\d+)(-test)?$")
+
+
+def git_lines(arguments, cwd=ROOT):
+    return [line for line in output(["git"] + arguments, cwd).splitlines() if line.strip()]
+
+
+def tag_commit(tag, cwd=ROOT):
+    return output(["git", "rev-parse", tag + "^{commit}"], cwd).strip()
+
+
+def header_versions(cwd=ROOT):
+    """The ESP's, the application's and the SPL's header versions."""
+    return {key: source_version(os.path.join(cwd, os.path.relpath(header, ROOT)), prefix)
+            for key, (header, prefix, _) in COMPONENTS.items()}
+
+
+def promoted_from(tag, cwd=ROOT):
+    """The test tag a release is promoted from: the highest vA.B.C-test that
+    is an ancestor of the release's commit and lower than it."""
+    version = tuple(int(part) for part in TAG.match(tag).groups()[:3])
+    tests = []
+    for name in git_lines(["tag", "--merged", tag, "--list", "v*-test"], cwd):
+        match = TAG.match(name)
+        if match and match.group(4):
+            number = tuple(int(part) for part in match.groups()[:3])
+            if number < version:
+                tests.append((number, name))
+    if not tests:
+        raise ReleaseError("%s: no vX.Y.Z-test tag before it to promote" % tag)
+    return max(tests)[1]
+
+
+def repository(cwd=ROOT):
+    """owner/name, from GITHUB_REPOSITORY (in CI) or the origin URL."""
+    if os.environ.get("GITHUB_REPOSITORY"):
+        return os.environ["GITHUB_REPOSITORY"]
+    url = output(["git", "remote", "get-url", "origin"], cwd).strip()
+    match = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$", url)
+    if not match:
+        raise ReleaseError("origin is not on GitHub: %s" % url)
+    return match.group(1)
+
+
+def ci_passed(commit, cwd=ROOT):
+    """Whether the release workflow succeeded for that commit (gh)."""
+    gh = need("gh", "the GitHub CLI, to see the test tag's CI run")
+    runs = output([gh, "api", "repos/%s/actions/workflows/%s/runs?head_sha=%s&status=success"
+                   % (repository(cwd), RELEASE_WORKFLOW, commit), "--jq", ".total_count"], cwd)
+    try:
+        return int(runs.strip() or "0") > 0
+    except ValueError:
+        raise ReleaseError("gh: %s" % runs.strip())
+
+
+def check_tag(tag, ci_check=True, cwd=ROOT):
+    """A tag's checks (above). Whether it is a test tag."""
+    match = TAG.match(tag or "")
+    if not match:
+        raise ReleaseError("%s: tags are vX.Y.Z (a release) or vX.Y.Z-test (a test)" % tag)
+    version = ".".join(match.groups()[:3])
+    test = bool(match.group(4))
+    head = output(["git", "rev-parse", "HEAD"], cwd).strip()
+    if tag_commit(tag, cwd) != head:
+        raise ReleaseError("%s is not HEAD: check out the tag" % tag)
+    versions = header_versions(cwd)
+    for key in ("esp", "pic"):
+        if versions[key] != version:
+            raise ReleaseError("%s: the %s's version header says %s" % (tag, COMPONENT_NAMES[key], versions[key]))
+    say("%s: the ESP and the application at %s, the SPL at %s" % (tag, version, versions["pic_spl"]))
+    if test:
+        say("%s: a test release, for the dev configuration" % tag)
+        return True
+    source = promoted_from(tag, cwd)
+    changed = git_lines(["diff", "--name-only", source, tag], cwd)
+    other = [path for path in changed if path not in VERSION_HEADERS]
+    if other:
+        raise ReleaseError("%s: more than the version headers changed since %s: %s"
+                           % (tag, source, ", ".join(other)))
+    say("%s: promoted from %s, only %s changed" % (tag, source, ", ".join(changed) or "nothing"))
+    if ci_check:
+        output(["git", "fetch", "--quiet", "origin", "master"], cwd)
+    if subprocess.call(["git", "merge-base", "--is-ancestor", head, "origin/master"], cwd=cwd) != 0:
+        raise ReleaseError("%s is not on origin/master" % tag)
+    if ci_check:
+        if not ci_passed(tag_commit(source, cwd), cwd):
+            raise ReleaseError("%s: no successful %s run for %s" % (tag, RELEASE_WORKFLOW, source))
+        say("%s: %s's CI run succeeded" % (tag, source))
+    return False
+
+
 # ---- The whole -----------------------------------------------------------------
 
 def main(argv=None):
@@ -418,7 +531,31 @@ def main(argv=None):
     parser.add_argument("--no-verify", action="store_true", help="no download afterwards")
     parser.add_argument("--allow-dirty", action="store_true", help="uncommitted changes allowed, and every component built and released whatever its version")
     parser.add_argument("--dry-run", action="store_true", help="print, run nothing, upload nothing")
+    parser.add_argument("--check-tag", metavar="TAG", help="the tag's checks alone (above)")
+    parser.add_argument("--from-tag", metavar="TAG",
+                        help="the tag's checks, then its release (dev for a -test tag)")
+    parser.add_argument("--no-ci-check", action="store_true",
+                        help="with a release tag: skip the test tag's CI run and the fetch")
     args = parser.parse_args(argv)
+    if args.check_tag:
+        try:
+            check_tag(args.check_tag, not args.no_ci_check)
+        except ReleaseError as error:
+            print("\nrelease: %s" % error, file=sys.stderr)
+            return 1
+        return 0
+    if args.from_tag:
+        if args.tag or args.config or args.device or args.allow_dirty:
+            parser.error("--from-tag decides --config and --tag itself")
+        try:
+            test = check_tag(args.from_tag, not args.no_ci_check)
+        except ReleaseError as error:
+            print("\nrelease: %s" % error, file=sys.stderr)
+            return 1
+        if test:
+            args.config = "dev"
+        else:
+            args.tag = args.from_tag
     if args.tag and (args.allow_dirty or args.config or args.device):
         parser.error("--tag: a release for everyone, from a clean tree (no --allow-dirty, "
                      "--config or --device)")

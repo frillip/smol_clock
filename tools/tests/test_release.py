@@ -134,5 +134,158 @@ class MainTest(unittest.TestCase):
                             for c in calls))
 
 
+class TagTest(unittest.TestCase):
+    """The CI's tags against a repository of their own: a test tag, then a
+    release promoted from it with the version headers alone changed."""
+
+    def git(self, *arguments):
+        import subprocess
+        subprocess.check_call(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c",
+                               "commit.gpgsign=false", "-c", "tag.gpgsign=false"] + list(arguments),
+                              cwd=self.repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def headers(self, esp, pic, spl="1.0.0"):
+        for path, prefix, version in (("esp_src/src/version.h", "ESP", esp),
+                                      ("dspic_src/platform/version.h", "PIC", pic),
+                                      ("dspic_spl/spl_version.h", "SPL", spl)):
+            full = os.path.join(self.repo, *path.split("/"))
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            major, minor, patch = version.split(".")
+            with open(full, "w") as handle:
+                handle.write("#define %s_VERSION_MAJOR %s\n#define %s_VERSION_MINOR %s\n"
+                             "#define %s_VERSION_PATCH %s\n" % (prefix, major, prefix, minor, prefix, patch))
+
+    def commit(self, message, tag=None):
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", message)
+        if tag:
+            self.git("tag", tag)
+        self.git("update-ref", "refs/remotes/origin/master", "HEAD")
+
+    def code(self, text):
+        with open(os.path.join(self.repo, "code.c"), "w") as handle:
+            handle.write(text)
+
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.repo = self.folder.name
+        self.git("init", "-q", "-b", "master")
+        self.headers("0.3.71", "0.3.71")
+        self.code("one")
+        self.commit("start")
+        self.code("two")
+        self.headers("0.3.72", "0.3.72")
+        self.commit("work", "v0.3.72-test")
+        self.out = []
+        self.say = mock.patch.object(release, "say", self.out.append)
+        self.say.start()
+
+    def tearDown(self):
+        self.say.stop()
+        self.folder.cleanup()
+
+    def check(self, tag, ci=None):
+        self.git("checkout", "-q", tag)
+        if ci is None:
+            return release.check_tag(tag, ci_check=False, cwd=self.repo)
+        with mock.patch.object(release, "ci_passed", lambda commit, cwd: ci), \
+                mock.patch.object(release, "output", self.no_fetch):
+            return release.check_tag(tag, ci_check=True, cwd=self.repo)
+
+    def no_fetch(self, command, cwd=release.ROOT):
+        if command[:2] == ["git", "fetch"]:
+            return ""
+        return self.real_output(command, cwd)
+
+    real_output = staticmethod(release.output)
+
+    def test_test_tag(self):
+        self.assertTrue(self.check("v0.3.72-test"))
+        self.assertTrue(any("for the dev configuration" in line for line in self.out))
+
+    def test_promotion(self):
+        self.git("checkout", "-q", "master")
+        self.headers("0.3.73", "0.3.73")
+        self.commit("0.3.73", "v0.3.73")
+        self.assertFalse(self.check("v0.3.73", ci=True))
+        self.assertTrue(any("promoted from v0.3.72-test" in line for line in self.out))
+        with self.assertRaises(release.ReleaseError) as caught:
+            self.check("v0.3.73", ci=False)
+        self.assertIn("no successful release.yml run for v0.3.72-test", str(caught.exception))
+
+    def test_more_than_versions(self):
+        self.git("checkout", "-q", "master")
+        self.headers("0.3.73", "0.3.73")
+        self.code("three")
+        self.commit("0.3.73 and a change", "v0.3.73")
+        with self.assertRaises(release.ReleaseError) as caught:
+            self.check("v0.3.73")
+        self.assertIn("more than the version headers changed since v0.3.72-test: code.c",
+                      str(caught.exception))
+
+    def test_versions_must_match(self):
+        self.git("checkout", "-q", "master")
+        self.headers("0.3.73", "0.3.72")
+        self.commit("half", "v0.3.73")
+        with self.assertRaises(release.ReleaseError) as caught:
+            self.check("v0.3.73")
+        self.assertIn("the application's version header says 0.3.72", str(caught.exception))
+
+    def test_no_test_tag_or_not_on_master(self):
+        self.git("checkout", "-q", "master")
+        self.headers("0.3.72", "0.3.72")
+        self.git("tag", "v0.3.72")  # the same version as the test: nothing lower to promote
+        with self.assertRaises(release.ReleaseError) as caught:
+            self.check("v0.3.72")
+        self.assertIn("no vX.Y.Z-test tag before it", str(caught.exception))
+        self.git("checkout", "-q", "-b", "side")
+        self.headers("0.3.73", "0.3.73")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "side")
+        self.git("tag", "v0.3.73")
+        with self.assertRaises(release.ReleaseError) as caught:
+            self.check("v0.3.73")
+        self.assertIn("not on origin/master", str(caught.exception))
+
+    def test_names_and_head(self):
+        for bad in ("0.3.73", "v0.3", "v0.3.73-rc1", "v0.3.73-test2"):
+            with self.assertRaises(release.ReleaseError):
+                release.check_tag(bad, ci_check=False, cwd=self.repo)
+        self.git("checkout", "-q", "master")
+        self.code("later")
+        self.commit("later")
+        with self.assertRaises(release.ReleaseError) as caught:
+            release.check_tag("v0.3.72-test", ci_check=False, cwd=self.repo)
+        self.assertIn("is not HEAD", str(caught.exception))
+
+    def test_repository(self):
+        with mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": "frillip/smol_clock"}):
+            self.assertEqual(release.repository(self.repo), "frillip/smol_clock")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.git("remote", "add", "origin", "git@github.com:frillip/smol_clock.git")
+            self.assertEqual(release.repository(self.repo), "frillip/smol_clock")
+
+    def test_from_tag_sets_the_release(self):
+        recorded = []
+
+        def parse(argv):
+            recorded.append(argv)
+            raise release.ReleaseError("stop here")
+
+        for tag, config in (("v0.3.72-test", ["--config", "dev"]), ("v0.3.73", [])):
+            with mock.patch.object(release, "check_tag", lambda t, ci_check=True: t.endswith("-test")), \
+                    mock.patch.object(release, "load_settings", lambda: {}), \
+                    mock.patch.object(release, "check_clean", lambda allow: None), \
+                    mock.patch.object(release, "head_commit", lambda: "abc"), \
+                    mock.patch.object(release.upload_dist, "check", lambda s: "sftp"), \
+                    mock.patch.object(release, "need", lambda tool, why: tool), \
+                    mock.patch.object(release.make_dist, "parse_args", parse), mock.patch("sys.stderr"):
+                self.assertEqual(release.main(["--from-tag", tag]), 1)
+            self.assertEqual(recorded[-1][2:], config)  # after --base-url URL
+        # --from-tag decides --config and --tag itself.
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+            release.main(["--from-tag", "v0.3.73", "--config", "dev"])
+
+
 if __name__ == "__main__":
     unittest.main()

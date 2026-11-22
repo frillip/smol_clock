@@ -14,7 +14,8 @@
  * TEMP_COMP_DEFAULT_PPB_PER_C. The default is from two V2 boards' ESP32
  * modules (2026-11-17/20): -159 and -171 ppb/C against the board
  * temperature measured through the NTP lines, which understate it; -165
- * left about -40 ppb/C, -200 a little the other way.
+ * left about -40 ppb/C, -200 a little the other way. -180 since
+ * 2026-11-22: the two boards learnt about -200 and -155.
  *
  * The correction is a phase, us, added to UTC - local (esp_clock.h; local
  * is the ESP's microsecond timer, not local time): the integral of the
@@ -74,7 +75,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define TEMP_COMP_DEFAULT_PPB_PER_C (-190) // + = the crystal runs fast when warmer
+#define TEMP_COMP_DEFAULT_PPB_PER_C (-180) // + = the crystal runs fast when warmer
 #define TEMP_COMP_MAX_PPB_PER_C     2000
 #define TEMP_COMP_NOT_SET           INT32_MIN  // no coefficient set by hand
 #define TEMP_COMP_STALE_US          15000000LL // STAT-ENV comes every 5 s

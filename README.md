@@ -277,7 +277,7 @@ Values are written as people write them: on/off (or 1/0, yes/no), offsets as `+5
 | `esp [-v]` | Version, uptime, reset cause, the longest `loop()` pass (which service took it, when, and how many passes ran over a second; `-v` each service's longest) and settings |
 | `esp save`, `esp defaults`, `esp reset` | Save, defaults or restart for the ESP alone |
 | `esp factory` | Default ESP settings saved, Wi-Fi forgotten, and restart |
-| `esp tcomp [on\|off\|learn\|reset\|<ppb/C>]` | The ESP crystal's temperature compensation: shown, on or off, a coefficient set by hand (+ = fast when warmer), back to the learnt one (`learn`), or what was learnt forgotten (`reset`, on, -190 ppb/C until learnt again) |
+| `esp tcomp [on\|off\|learn\|reset\|<ppb/C>]` | The ESP crystal's temperature compensation: shown, on or off, a coefficient set by hand (+ = fast when warmer), back to the learnt one (`learn`), or what was learnt forgotten (`reset`, on, -180 ppb/C until learnt again) |
 
 # Future hardware improvements
 

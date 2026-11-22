@@ -91,7 +91,8 @@ import time
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(TOOLS, ".."))
-SETTINGS = os.path.join(TOOLS, "release.local.json")
+# On the CI machine the settings live outside the checkout.
+SETTINGS = os.environ.get("SMOL_RELEASE_SETTINGS") or os.path.join(TOOLS, "release.local.json")
 DIST = os.path.join(ROOT, "dist")
 WINDOWS = os.name == "nt"
 WINSCP_PLACES = [

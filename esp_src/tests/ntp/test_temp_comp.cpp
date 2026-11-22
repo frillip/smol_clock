@@ -166,7 +166,7 @@ static void test_day(void)
     } swings[] = {{"8 C over 2 h", 7200}, {"8 C over 6 h", 21600}};
 
     printf("A day of a crystal following the room, -165 ppb/C, polled every 512 s, the "
-           "default's -190\n");
+           "default's -180\n");
     for (const auto &swing : swings)
     {
         Result off = run_day(0, -165, swing.swing_s, 3);
@@ -246,11 +246,12 @@ static void test_learning(void)
     printf("  %d estimates, learnt %+.1f, last %+.1f\n", made, comp->learnt_ppb_per_c,
            comp->last_ppb_per_c);
     CHECK(made >= 3 && fabs(comp->last_ppb_per_c - 60) < 10);
-    CHECK(comp->learnt_ppb_per_c > -190 + 30.0 && comp->learnt_ppb_per_c <= -190 + 30.0 * made + 0.01);
+    CHECK(comp->learnt_ppb_per_c > TEMP_COMP_DEFAULT_PPB_PER_C + 30.0 &&
+          comp->learnt_ppb_per_c <= TEMP_COMP_DEFAULT_PPB_PER_C + 30.0 * made + 0.01);
 
     printf("  A flat room: nothing to learn from, short polls for the first 6 h; 8 h held\n");
     made = run_learning(-230, 21600, 0.0, 128, 100.0, 12, 7);
-    CHECK(made == 0 && comp->source == TEMP_COMP_DEFAULT && comp->ppb_per_c == -190);
+    CHECK(made == 0 && comp->source == TEMP_COMP_DEFAULT && comp->ppb_per_c == TEMP_COMP_DEFAULT_PPB_PER_C);
     CHECK(comp->window >= 220 && comp->window <= 226 && comp->window_range_centic < 200);
     CHECK(!comp->moving && comp->minutes == TEMP_COMP_HISTORY_MINUTES);
     CHECK(temp_comp_short_polls(5 * 3600 * S) == TEMP_COMP_POLLS_START &&
@@ -276,7 +277,7 @@ static void test_learning(void)
     temp_comp_configure(3, true, TEMP_COMP_NOT_SET);
     CHECK(comp->source == TEMP_COMP_LEARNT && comp->ppb_per_c == -201);
     temp_comp_forget(4);
-    CHECK(comp->source == TEMP_COMP_DEFAULT && comp->ppb_per_c == -190 && comp->estimates == 0 &&
+    CHECK(comp->source == TEMP_COMP_DEFAULT && comp->ppb_per_c == TEMP_COMP_DEFAULT_PPB_PER_C && comp->estimates == 0 &&
           !temp_comp_take_learnt(&ppb, &estimates));
     CHECK(temp_comp_short_polls(5) == TEMP_COMP_POLLS_NORMAL); // no temperature
     temp_comp_temperature(6, 3000);

@@ -848,7 +848,7 @@ static void test_esp(void)
     printf("ESP crystal temperature compensation\n");
     temp_comp_init();
     out = run("esp tcomp");
-    CHECK(contains(out, "esp tcomp: ON, -190 ppb/C (default); OFF")); // not configured yet
+    CHECK(contains(out, "esp tcomp: ON, -180 ppb/C (default); OFF")); // not configured yet
     CHECK(contains(out, "esp tcomp learning: 0 estimates, window 0 samples over 0.00 C, moved 0.00 C in 0 min\n"));
     out = run("esp tcomp -120");
     CHECK(user_prefs_esp_tcomp.set_ppb_per_c == -120 &&
@@ -867,7 +867,7 @@ static void test_esp(void)
           contains(out, "esp tcomp: OFF, +40 ppb/C (set)"));
     out = run("esp tcomp learn");
     CHECK(user_prefs_esp_tcomp.set_ppb_per_c == TEMP_COMP_NOT_SET &&
-          contains(out, "esp tcomp: OFF, -190 ppb/C (default)"));
+          contains(out, "esp tcomp: OFF, -180 ppb/C (default)"));
     temp_comp_restore(-175, 3);
     user_prefs_esp_tcomp.learnt_ppb_per_c = -175;
     user_prefs_esp_tcomp.learnt_estimates = 3;
@@ -879,7 +879,7 @@ static void test_esp(void)
     CHECK(user_prefs_esp_tcomp.enabled == 1 &&
           user_prefs_esp_tcomp.set_ppb_per_c == TEMP_COMP_NOT_SET &&
           user_prefs_esp_tcomp.learnt_estimates == 0 && learnt_saves == 1 &&
-          contains(out, "esp tcomp: ON, -190 ppb/C (default); ACTIVE") &&
+          contains(out, "esp tcomp: ON, -180 ppb/C (default); ACTIVE") &&
           contains(out, "esp tcomp learning: 0 estimates, window 0 samples over 0.00 C, moved 0.00 C in 0 min, short polls (start, 128 s)\n"));
     out = run("ntp server 2 offset 20000");
     CHECK(user_prefs_ntp_offset_us[2] == 150 && contains(out, "-10000 to 10000"));
