@@ -3,6 +3,7 @@
 #include <Preferences.h>
 #include <string.h>
 
+#include "../timing/temp_comp.h"
 #include "../util/time_text.h"
 
 #define NAMESPACE "CLOCK_PREFS"
@@ -11,12 +12,14 @@
 #define ASYM_KEY  "NTP_ASYM"
 #define DHCP_KEY  "NTP_DHCP"
 #define OFFS_KEY  "NTP_OFFS"
+#define TCO_KEY   "ESP_TCOMP"
 
 UserPrefs user_prefs;
 UserPrefsNtp user_prefs_ntp;
 int32_t user_prefs_ntp_asymmetry_us;
 int32_t user_prefs_ntp_dhcp;
 int32_t user_prefs_ntp_offset_us[NTP_SERVERS + 1];
+UserPrefsTcomp user_prefs_esp_tcomp;
 
 static Preferences store;
 static UserPrefs saved; // as last loaded or saved, to tell what is unsaved
@@ -24,6 +27,17 @@ static UserPrefsNtp saved_ntp;
 static int32_t saved_asymmetry_us;
 static int32_t saved_dhcp;
 static int32_t saved_offset_us[NTP_SERVERS + 1];
+static UserPrefsTcomp saved_tcomp;
+
+
+// On, nothing set, nothing learnt.
+static void tcomp_defaults(void)
+{
+    user_prefs_esp_tcomp.enabled = 1;
+    user_prefs_esp_tcomp.set_ppb_per_c = TEMP_COMP_NOT_SET;
+    user_prefs_esp_tcomp.learnt_ppb_per_c = 0;
+    user_prefs_esp_tcomp.learnt_estimates = 0;
+}
 static const char *const ntp_defaults[NTP_SERVERS] = NTP_SERVER_DEFAULTS;
 
 void user_prefs_set_string(char *field, const char *value)
@@ -67,6 +81,9 @@ void user_prefs_reset(void)
     user_prefs_ntp_asymmetry_us = NTP_ASYMMETRY_DEFAULT_US;
     user_prefs_ntp_dhcp = NTP_DHCP_DEFAULT;
     memset(user_prefs_ntp_offset_us, 0, sizeof(user_prefs_ntp_offset_us));
+    // The defaults keep what was learnt: it is this clock's, not a setting.
+    user_prefs_esp_tcomp.enabled = 1;
+    user_prefs_esp_tcomp.set_ppb_per_c = TEMP_COMP_NOT_SET;
     memset(&user_prefs_ntp, 0, sizeof(user_prefs_ntp));
     user_prefs_ntp.header = USER_PREFS_HEADER_VALUE;
     for (int index = 0; index < NTP_SERVERS; index++)
@@ -106,6 +123,14 @@ static unsigned repair(Stream *output)
                    user_prefs_ntp_offset_us[index] <= NTP_OFFSET_MAX_US,
                "ntp.offset", user_prefs_ntp_offset_us[index] = 0);
     }
+    REPAIR((user_prefs_esp_tcomp.enabled == 0 || user_prefs_esp_tcomp.enabled == 1) &&
+               (user_prefs_esp_tcomp.set_ppb_per_c == TEMP_COMP_NOT_SET ||
+                (user_prefs_esp_tcomp.set_ppb_per_c >= -TEMP_COMP_MAX_PPB_PER_C &&
+                 user_prefs_esp_tcomp.set_ppb_per_c <= TEMP_COMP_MAX_PPB_PER_C)) &&
+               user_prefs_esp_tcomp.learnt_ppb_per_c >= -TEMP_COMP_MAX_PPB_PER_C &&
+               user_prefs_esp_tcomp.learnt_ppb_per_c <= TEMP_COMP_MAX_PPB_PER_C &&
+               user_prefs_esp_tcomp.learnt_estimates >= 0,
+           "esp.tcomp", tcomp_defaults());
     REPAIR(string_ok(p->fields.rtzinfo.server) && p->fields.rtzinfo.server[0] != '\0',
            "rtzinfo.server",
            user_prefs_set_string(p->fields.rtzinfo.server, TZINFO_SERVER_DEFAULT));
@@ -166,6 +191,13 @@ void user_prefs_init(Stream *output)
     {
         store.getBytes(OFFS_KEY, user_prefs_ntp_offset_us, sizeof(user_prefs_ntp_offset_us));
     }
+    // Not stored (older firmware) or another size (before learning): on,
+    // nothing set or learnt.
+    tcomp_defaults();
+    if (store.getBytesLength(TCO_KEY) == sizeof(user_prefs_esp_tcomp))
+    {
+        store.getBytes(TCO_KEY, &user_prefs_esp_tcomp, sizeof(user_prefs_esp_tcomp));
+    }
     stored_ntp = store.getBytesLength(NTP_KEY);
     if (stored_ntp == sizeof(user_prefs_ntp))
     {
@@ -207,6 +239,7 @@ void user_prefs_init(Stream *output)
     saved_asymmetry_us = user_prefs_ntp_asymmetry_us;
     saved_dhcp = user_prefs_ntp_dhcp;
     memcpy(saved_offset_us, user_prefs_ntp_offset_us, sizeof(saved_offset_us));
+    saved_tcomp = user_prefs_esp_tcomp;
 }
 
 
@@ -215,7 +248,8 @@ bool user_prefs_unsaved(void)
     return memcmp(saved.raw, user_prefs.raw, sizeof(saved.raw)) != 0 ||
            memcmp(&saved_ntp, &user_prefs_ntp, sizeof(saved_ntp)) != 0 ||
            saved_asymmetry_us != user_prefs_ntp_asymmetry_us || saved_dhcp != user_prefs_ntp_dhcp ||
-           memcmp(saved_offset_us, user_prefs_ntp_offset_us, sizeof(saved_offset_us)) != 0;
+           memcmp(saved_offset_us, user_prefs_ntp_offset_us, sizeof(saved_offset_us)) != 0 ||
+           memcmp(&saved_tcomp, &user_prefs_esp_tcomp, sizeof(saved_tcomp)) != 0;
 }
 
 
@@ -227,12 +261,24 @@ void user_prefs_save(void)
     store.putInt(ASYM_KEY, user_prefs_ntp_asymmetry_us);
     store.putInt(DHCP_KEY, user_prefs_ntp_dhcp);
     store.putBytes(OFFS_KEY, user_prefs_ntp_offset_us, sizeof(user_prefs_ntp_offset_us));
+    store.putBytes(TCO_KEY, &user_prefs_esp_tcomp, sizeof(user_prefs_esp_tcomp));
     store.end();
     saved = user_prefs;
     saved_ntp = user_prefs_ntp;
     saved_asymmetry_us = user_prefs_ntp_asymmetry_us;
     saved_dhcp = user_prefs_ntp_dhcp;
     memcpy(saved_offset_us, user_prefs_ntp_offset_us, sizeof(saved_offset_us));
+    saved_tcomp = user_prefs_esp_tcomp;
+}
+
+
+void user_prefs_save_tcomp_learnt(void)
+{
+    saved_tcomp.learnt_ppb_per_c = user_prefs_esp_tcomp.learnt_ppb_per_c;
+    saved_tcomp.learnt_estimates = user_prefs_esp_tcomp.learnt_estimates;
+    store.begin(NAMESPACE, false);
+    store.putBytes(TCO_KEY, &saved_tcomp, sizeof(saved_tcomp));
+    store.end();
 }
 
 
@@ -296,4 +342,16 @@ void user_prefs_print(Stream *output)
     }
     output->printf("  Telnet: start-up %s, port %u\n",
                    p->fields.telnet.flags.enabled ? "ON" : "OFF", p->fields.telnet.port);
+    output->printf("  Crystal temperature compensation: %s", user_prefs_esp_tcomp.enabled ? "ON" : "OFF");
+    if (user_prefs_esp_tcomp.set_ppb_per_c != TEMP_COMP_NOT_SET)
+    {
+        output->printf(", set %+ld ppb/C", (long)user_prefs_esp_tcomp.set_ppb_per_c);
+    }
+    if (user_prefs_esp_tcomp.learnt_estimates > 0)
+    {
+        output->printf(", learnt %+ld ppb/C (%ld estimates)",
+                       (long)user_prefs_esp_tcomp.learnt_ppb_per_c,
+                       (long)user_prefs_esp_tcomp.learnt_estimates);
+    }
+    output->printf("\n");
 }

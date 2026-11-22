@@ -71,6 +71,20 @@ void setup()
 
 // Each ESP PPS edge: TIME-NTP to the PIC, and the status LED while synced:
 // one flash, or two while the NTP servers disagree.
+// The board's temperature, from the PIC's STAT-ENV while it is fresh, to
+// the ESP crystal's temperature compensation. No reading for a while (no
+// BME280, or the PIC silent) and the compensation holds (temp_comp.h).
+static void service_temperature(void)
+{
+    SML_STAT_ENV_PAYLOAD env;
+
+    if (pic_link_get(SML_CLASS_STAT, SML_STAT_ENV, &env, 1000U) &&
+        (env.flags & SML_ENV_BOARD_TEMP_VALID))
+    {
+        ntp_board_temperature(env.board_temperature_centic);
+    }
+}
+
 static void service_ntp_report(void)
 {
     SML_TIME_NTP_PAYLOAD report;
@@ -108,6 +122,7 @@ void loop()
     TIMED("pic_boot", pic_boot_service());
     TIMED("wifi", wifi_link_service());
     network_up = wifi_link_is_up();
+    TIMED("temperature", service_temperature());
     TIMED("ntp", ntp_service(network_up));
     TIMED("ntp_report", service_ntp_report());
     TIMED("tzinfo", tzinfo_service(network_up));

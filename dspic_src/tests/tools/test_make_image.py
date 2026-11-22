@@ -406,5 +406,64 @@ class ReleasedIpl(Files):
             make_dist.copy_released_ipl(path, self.path("out"))
 
 
+class DistAgainstManifest(Files):
+    """make_dist.py end to end: a dist/ made, --check finding the manifest
+    offers it, then an ESP rebuilt under the same version: warned of when
+    put in the manifest, and found by --check while it is not."""
+
+    def esp_bin(self, filler):
+        data = bytearray(0x100)
+        data[0] = 0xE9
+        data[0x20:0x24] = struct.pack("<I", 0xABCD5432)
+        data[0x40:0x40 + len(filler)] = filler
+        data += b"SMOL CLOCK V2/0.3.69\x00"
+        path = self.path("esp.bin")
+        with open(path, "wb") as handle:
+            handle.write(bytes(data))
+        return path
+
+    def run_dist(self, *extra):
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = make_dist.main(["--dist", self.path("dist"), "--base-url", "https://example.org/v2plus/",
+                                   "--ipl", self.ipl, "--spl", self.spl, "--app", self.app,
+                                   "--esp", self.esp] + list(extra))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_rebuild_under_the_same_version(self):
+        words, _ = mi.build_ipl(self.hexfile("ipl_build.hex", ipl_words()), 0x6A081F00, self.warn)
+        self.ipl = self.path("ipl-1.0.0.hex")
+        mi.write_hex(self.ipl, words)
+        self.spl = self.hexfile("spl.hex", spl_words())
+        self.app = self.hexfile("app.hex", app_words())
+        self.esp = self.esp_bin(b"first build")
+
+        code, out, err = self.run_dist("--check")
+        self.assertEqual(code, 1)  # no manifest yet
+        self.assertIn("no manifest there", err)
+        code, out, err = self.run_dist()
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("another build", err)
+        code, out, err = self.run_dist("--check")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("The manifest offers these builds.", out)
+
+        # Built again, the manifest not made: --check says so.
+        self.esp = self.esp_bin(b"second build")
+        code, out, err = self.run_dist("--check")
+        self.assertEqual(code, 1)
+        self.assertIn("REBUILD  ESP 0.3.69: another build under the same version", out)
+        self.assertIn("ok       application", out)
+        # Made: written, and warned of.
+        code, out, err = self.run_dist()
+        self.assertEqual(code, 0, err)
+        self.assertIn("warning: ESP 0.3.69: another build under the same version: clocks at 0.3.69 "
+                      "keep theirs (update esp force installs it)", err)
+        code, out, err = self.run_dist("--check")
+        self.assertEqual(code, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@
 #include <esp_system.h>
 
 #include "../../src/util/loop_timing.h"
+#include "../../src/timing/temp_comp.h"
 #include "../../src/console/commands.h"
 #include "../../src/net/telnet.h"
 #include "../../src/net/telnet_auth.h"
@@ -61,7 +62,13 @@ static void called(const char *name)
 
 UserPrefs user_prefs;
 UserPrefsNtp user_prefs_ntp;
+UserPrefsTcomp user_prefs_esp_tcomp = {1, TEMP_COMP_NOT_SET, 0, 0};
 static int prefs_saves;
+static int learnt_saves;
+void user_prefs_save_tcomp_learnt(void)
+{
+    learnt_saves++;
+}
 char *user_prefs_ntp_server(int index)
 {
     return index == 0 ? user_prefs.fields.ntp.server : user_prefs_ntp.server[index - 1];
@@ -73,6 +80,8 @@ void user_prefs_reset(void)
     memset(&user_prefs_ntp, 0, sizeof user_prefs_ntp);
     user_prefs.fields.ntp.interval = NTP_INTERVAL_DEFAULT;
     user_prefs.fields.telnet.port = TELNET_PORT_DEFAULT;
+    user_prefs_esp_tcomp.enabled = 1;
+    user_prefs_esp_tcomp.set_ppb_per_c = TEMP_COMP_NOT_SET;
 }
 void user_prefs_save(void)
 {
@@ -835,6 +844,43 @@ static void test_esp(void)
     CHECK(user_prefs_ntp_offset_us[0] == -50 && contains(out, "ntp server 0 offset: -50 us"));
     out = run("ntp server 0 offset");
     CHECK(contains(out, "ntp server 0 offset: -50 us"));
+
+    printf("ESP crystal temperature compensation\n");
+    temp_comp_init();
+    out = run("esp tcomp");
+    CHECK(contains(out, "esp tcomp: ON, -190 ppb/C (default); OFF")); // not configured yet
+    CHECK(contains(out, "esp tcomp learning: 0 estimates, window 0 samples over 0.00 C, moved 0.00 C in 0 min\n"));
+    out = run("esp tcomp -120");
+    CHECK(user_prefs_esp_tcomp.set_ppb_per_c == -120 &&
+          contains(out, "esp tcomp: ON, -120 ppb/C (set); NO TEMPERATURE"));
+    temp_comp_temperature(esp_timer_get_time(), 3000);
+    temp_comp_temperature(esp_timer_get_time(), 3250);
+    out = run("esp tcomp");
+    CHECK(contains(out, "ACTIVE, board 32.50 C, reference 30.00 C, crystal -300 ppb, correction"));
+    out = run("esp tcomp off");
+    CHECK(user_prefs_esp_tcomp.enabled == 0 &&
+          contains(out, "esp tcomp: OFF, -120 ppb/C (set); OFF"));
+    out = run("esp tcomp 2500");
+    CHECK(user_prefs_esp_tcomp.set_ppb_per_c == -120 && contains(out, "bad value"));
+    out = run("esp tcomp +40");
+    CHECK(user_prefs_esp_tcomp.set_ppb_per_c == 40 &&
+          contains(out, "esp tcomp: OFF, +40 ppb/C (set)"));
+    out = run("esp tcomp learn");
+    CHECK(user_prefs_esp_tcomp.set_ppb_per_c == TEMP_COMP_NOT_SET &&
+          contains(out, "esp tcomp: OFF, -190 ppb/C (default)"));
+    temp_comp_restore(-175, 3);
+    user_prefs_esp_tcomp.learnt_ppb_per_c = -175;
+    user_prefs_esp_tcomp.learnt_estimates = 3;
+    out = run("esp tcomp on");
+    CHECK(contains(out, "esp tcomp: ON, -175 ppb/C (learnt); ACTIVE") &&
+          contains(out, "esp tcomp learning: 3 estimates, learnt -175.0 ppb/C, window"));
+    learnt_saves = 0;
+    out = run("esp tcomp reset");
+    CHECK(user_prefs_esp_tcomp.enabled == 1 &&
+          user_prefs_esp_tcomp.set_ppb_per_c == TEMP_COMP_NOT_SET &&
+          user_prefs_esp_tcomp.learnt_estimates == 0 && learnt_saves == 1 &&
+          contains(out, "esp tcomp: ON, -190 ppb/C (default); ACTIVE") &&
+          contains(out, "esp tcomp learning: 0 estimates, window 0 samples over 0.00 C, moved 0.00 C in 0 min, short polls (start, 128 s)\n"));
     out = run("ntp server 2 offset 20000");
     CHECK(user_prefs_ntp_offset_us[2] == 150 && contains(out, "-10000 to 10000"));
     out = run("ntp server 2 offset 1x");

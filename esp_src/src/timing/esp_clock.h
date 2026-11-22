@@ -30,6 +30,10 @@
  *     window's best left out (their asymmetry is unknown). Needs
  *     ESP_CLOCK_FREQUENCY_MIN_US of span; two samples give a first estimate.
  *
+ * The ESP crystal's temperature compensation (temp_comp.h) sits outside the
+ * model: samples come in with it taken off, so the model fits what it does
+ * not explain, and esp_clock_utc_us() adds it back.
+ *
  * The uncertainty is a +/- bound in the sense of SML, the tightest that any
  * sample in the frequency window gives: how far the model, run back to the
  * sample's time and on by what is still being slewed in, is from the
@@ -126,8 +130,12 @@ EspClockAction esp_clock_update(const EspClockSample *sample, int64_t now_us,
                                 int64_t time_constant_us, const EspClockEstimate *estimate);
 
 bool esp_clock_is_valid(void);
-// Valid only while esp_clock_is_valid().
+// Valid only while esp_clock_is_valid(). With the temperature
+// compensation (temp_comp.h) added: the clock's UTC.
 int64_t esp_clock_utc_us(int64_t local_us);
+// ... without it: the model alone, which the samples (given with the
+// compensation taken off, ntp.cpp) are judged against.
+int64_t esp_clock_model_utc_us(int64_t local_us);
 // The local time at which UTC reaches utc_us.
 int64_t esp_clock_local_us(int64_t utc_us);
 uint32_t esp_clock_uncertainty_ns(int64_t local_us);
@@ -135,6 +143,7 @@ uint32_t esp_clock_uncertainty_ns(int64_t local_us);
 bool esp_clock_correcting(int64_t local_us);
 // Local microseconds to add to 1 000 000 for one UTC second, Q16 (the PPS
 // uses it to run on while the loop is busy).
+// With the temperature compensation's rate now.
 int32_t esp_clock_period_adjust_q16(void);
 
 // The drift allowed for since a sample, ppb (see above).

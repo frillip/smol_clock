@@ -134,6 +134,19 @@ static_assert(sizeof(UserPrefs) == 652, "the stored layout must not change");
 // under its own key.
 #define NTP_OFFSET_MAX_US 10000
 
+// The ESP crystal's temperature compensation (timing/temp_comp.h): on or
+// off; a coefficient set by hand, ppb/C (+ = the crystal runs fast when
+// warmer), or TEMP_COMP_NOT_SET; and what was learnt, and from how many
+// estimates (0: nothing). Stored under its own key; what is learnt is
+// stored as it is learnt (user_prefs_save_tcomp_learnt()).
+typedef struct
+{
+    int32_t enabled;
+    int32_t set_ppb_per_c;
+    int32_t learnt_ppb_per_c;
+    int32_t learnt_estimates;
+} UserPrefsTcomp;
+
 // NTP: the server DHCP offers (option 42, IPv4, the first only), as server
 // 0, polled before server 1: disabled, enabled (one server among the
 // others) or preferred (followed alone while it agrees with the others, as
@@ -156,6 +169,7 @@ typedef struct __attribute__((packed))
 
 extern UserPrefs user_prefs;
 extern UserPrefsNtp user_prefs_ntp;
+extern UserPrefsTcomp user_prefs_esp_tcomp;
 extern int32_t user_prefs_ntp_asymmetry_us;
 extern int32_t user_prefs_ntp_dhcp; // NtpDhcpMode
 extern int32_t user_prefs_ntp_offset_us[NTP_SERVERS + 1];
@@ -164,6 +178,9 @@ extern int32_t user_prefs_ntp_offset_us[NTP_SERVERS + 1];
 void user_prefs_init(Stream *output);
 void user_prefs_reset(void);
 void user_prefs_save(void);
+// What the temperature compensation has learnt, stored now, alone: the
+// rest of the tcomp settings as last saved.
+void user_prefs_save_tcomp_learnt(void);
 // The settings differ from those last loaded or saved.
 bool user_prefs_unsaved(void);
 // Every setting, by what it does, and whether they are saved.

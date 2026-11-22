@@ -9,6 +9,7 @@
 #include <Preferences.h>
 
 #include "../../src/settings/user_prefs.h"
+#include "../../src/timing/temp_comp.h"
 
 std::map<std::string, std::vector<unsigned char>> fake_nvs;
 uint32_t fake_millis;
@@ -113,6 +114,61 @@ int main(void)
     CHECK(user_prefs_ntp_asymmetry_us == 0 && out.out.find("ntp.asymmetry invalid") != std::string::npos);
     user_prefs_print(&out);
     CHECK(out.out.find("asymmetry +0 us") != std::string::npos);
+
+    printf("Crystal temperature compensation: on, nothing set or learnt, if never stored; kept; "
+           "repaired\n");
+    fake_nvs.erase("ESP_TCOMP");
+    user_prefs_init(&out);
+    CHECK(user_prefs_esp_tcomp.enabled == 1 &&
+          user_prefs_esp_tcomp.set_ppb_per_c == TEMP_COMP_NOT_SET &&
+          user_prefs_esp_tcomp.learnt_estimates == 0 && !user_prefs_unsaved());
+    user_prefs_esp_tcomp.enabled = 0;
+    user_prefs_esp_tcomp.set_ppb_per_c = -120;
+    CHECK(user_prefs_unsaved());
+    user_prefs_save();
+    user_prefs_init(&out);
+    CHECK(user_prefs_esp_tcomp.enabled == 0 && user_prefs_esp_tcomp.set_ppb_per_c == -120 &&
+          !user_prefs_unsaved());
+
+    printf("  What is learnt saves itself, and only itself; the defaults keep it\n");
+    user_prefs_esp_tcomp.enabled = 1; // not saved
+    user_prefs_esp_tcomp.learnt_ppb_per_c = -187;
+    user_prefs_esp_tcomp.learnt_estimates = 4;
+    user_prefs_save_tcomp_learnt();
+    CHECK(user_prefs_unsaved()); // the enable still
+    user_prefs_init(&out);
+    CHECK(user_prefs_esp_tcomp.enabled == 0 && user_prefs_esp_tcomp.set_ppb_per_c == -120 &&
+          user_prefs_esp_tcomp.learnt_ppb_per_c == -187 &&
+          user_prefs_esp_tcomp.learnt_estimates == 4 && !user_prefs_unsaved());
+    user_prefs_reset();
+    CHECK(user_prefs_esp_tcomp.enabled == 1 &&
+          user_prefs_esp_tcomp.set_ppb_per_c == TEMP_COMP_NOT_SET &&
+          user_prefs_esp_tcomp.learnt_ppb_per_c == -187 &&
+          user_prefs_esp_tcomp.learnt_estimates == 4);
+    user_prefs_print(&out);
+    CHECK(out.out.find("temperature compensation: ON, learnt -187 ppb/C (4 estimates)") !=
+          std::string::npos);
+    user_prefs_save();
+
+    printf("  The old two-value record: defaults; out of range: repaired\n");
+    {
+        int32_t old[2] = {1, -200};
+        fake_nvs["ESP_TCOMP"].assign((unsigned char *)old, (unsigned char *)old + 8);
+    }
+    user_prefs_init(&out);
+    CHECK(user_prefs_esp_tcomp.enabled == 1 &&
+          user_prefs_esp_tcomp.set_ppb_per_c == TEMP_COMP_NOT_SET &&
+          user_prefs_esp_tcomp.learnt_estimates == 0);
+    {
+        int32_t bad[4] = {1, TEMP_COMP_MAX_PPB_PER_C + 1, 0, 0};
+        fake_nvs["ESP_TCOMP"].assign((unsigned char *)bad, (unsigned char *)bad + 16);
+    }
+    out.out.clear();
+    user_prefs_init(&out);
+    CHECK(user_prefs_esp_tcomp.set_ppb_per_c == TEMP_COMP_NOT_SET &&
+          out.out.find("esp.tcomp invalid") != std::string::npos);
+    user_prefs_print(&out);
+    CHECK(out.out.find("temperature compensation: ON\n") != std::string::npos);
 
     printf("NTP offsets: none if never stored, kept, repaired if out of range\n");
     fake_nvs.erase("NTP_OFFS");

@@ -6,7 +6,7 @@
 
 For each host, every --interval seconds: connect, ask for the status (an
 empty line, sent again if nothing comes: a fresh connection sometimes takes
-a few), then `ntp tracking`, `ntp gnss`, `osc` and `esp`, then quit. The
+a few), then `ntp tracking`, `ntp gnss`, `osc`, `esp` and `esp tcomp`, then quit. The
 connection is not kept: the ESP's telnet takes one client, and this leaves
 it free between samples. Every command used is one that needs no login, so
 no password is sent or kept. `pic -v` is not used: it holds the PIC's main
@@ -51,6 +51,17 @@ FIELDS = [
     "ntp_gnss_latest_ns", "ntp_gnss_hour_mean_ns", "ntp_gnss_hour_sd_ns", "ntp_gnss_hour_rms_ns",
     # The ESP's loop (esp)
     "loop_longest_ns", "loop_longest_by", "loop_slow_passes",
+    # The ESP crystal's temperature compensation (esp tcomp): its setting,
+    # state, reference temperature, the crystal against it (+ = fast) and
+    # the correction so far; the coefficient's source (default, learnt, set),
+    # and learning: estimates, the learnt value, the latest fit (+/- its
+    # standard error, over its temperature range), the window, the board's
+    # movement over the last 30 min, short polls and why (start, moving)
+    "tcomp_enabled", "tcomp_ppb_per_c", "tcomp_state", "tcomp_reference_c", "tcomp_crystal_ppb",
+    "tcomp_correction_us", "tcomp_source", "tcomp_estimates", "tcomp_learnt_ppb_per_c",
+    "tcomp_last_ppb_per_c", "tcomp_last_se_ppb", "tcomp_last_range_c", "tcomp_window",
+    "tcomp_short_polls", "tcomp_moved_c", "tcomp_short_reason", "tcomp_last_turn_c",
+    "tcomp_last_rho",
     # The monitoring host
     "host_temp_c",
 ]
@@ -180,6 +191,49 @@ def parse_esp(text, row):
         row["loop_slow_passes"] = match.group(4)
 
 
+def parse_tcomp(text, row):
+    """esp tcomp: the ESP crystal's temperature compensation."""
+    match = find(r"^esp tcomp: (ON|OFF), (" + NUMBER + r") ppb/C(?: \((\w+)\))?[^;]*; ([A-Z ]+?)(?:,|$)(.*)$",
+                 text)
+    if not match:
+        return
+    row["tcomp_enabled"] = "1" if match.group(1) == "ON" else "0"
+    row["tcomp_ppb_per_c"] = match.group(2)
+    if match.group(3):
+        row["tcomp_source"] = match.group(3)
+    learning = find(r"^esp tcomp learning: (\d+) estimates(.*)$", text)
+    if learning:
+        row["tcomp_estimates"] = learning.group(1)
+        more = learning.group(2)
+        row["tcomp_short_polls"] = "1" if "short polls" in more else "0"
+        found = re.search(r"short polls \(([a-z ]+)(?:, \d+ s)?\)", more)
+        row["tcomp_short_reason"] = found.group(1) if found else ""
+        found = re.search(r"moved (" + NUMBER + r") C", more)
+        if found:
+            row["tcomp_moved_c"] = found.group(1)
+        found = re.search(r"over " + NUMBER + r" C \((" + NUMBER + r") C each way\), r (" + NUMBER + r")",
+                          more)
+        if found:
+            row["tcomp_last_turn_c"], row["tcomp_last_rho"] = found.groups()
+        for name, pattern in (("tcomp_learnt_ppb_per_c", r"learnt (" + NUMBER + r") ppb/C"),
+                              ("tcomp_window", r"window (\d+) samples")):
+            found = re.search(pattern, more)
+            if found:
+                row[name] = found.group(1)
+        found = re.search(r"last (" + NUMBER + r") \+/- (" + NUMBER + r") ppb/C over (" + NUMBER + r") C",
+                          more)
+        if found:
+            row["tcomp_last_ppb_per_c"], row["tcomp_last_se_ppb"], row["tcomp_last_range_c"] = found.groups()
+    row["tcomp_state"] = match.group(4).strip()
+    rest = match.group(5)
+    for name, pattern in (("tcomp_reference_c", r"reference (" + NUMBER + r") C"),
+                          ("tcomp_crystal_ppb", r"crystal (" + NUMBER + r") ppb"),
+                          ("tcomp_correction_us", r"correction (" + NUMBER + r") us")):
+        found = re.search(pattern, rest)
+        if found:
+            row[name] = found.group(1)
+
+
 # ---- Talking to the clock --------------------------------------------------------------
 
 IAC = 255
@@ -277,6 +331,9 @@ def sample(host, port, timeout):
         # Printed by the PIC, so it comes after the prompt: waited for.
         parse_osc(console.command("osc", r"^\s+Stored:", timeout=4.0, quiet=0.5), row)
         parse_esp(console.command("esp", r"^Settings:", quiet=0.5), row)
+        # Older firmware has none: its error ends it as quickly.
+        parse_tcomp(console.command("esp tcomp", r"^esp tcomp(?: learning)?:|^esp\b.*(?:unknown|expected)",
+                                    timeout=3.0, quiet=0.3), row)
     finally:
         console.close()
     return row, "".join(console.received)

@@ -3,6 +3,8 @@
 #include <math.h>
 #include <string.h>
 
+#include "temp_comp.h"
+
 // After a step, the edge is reported as correcting for this long.
 #define STEP_CORRECTING_US 2000000LL
 
@@ -67,7 +69,9 @@ static int64_t slewed(int64_t local_us)
 }
 
 
-int64_t esp_clock_utc_us(int64_t local_us)
+// UTC as the model has it, without the temperature compensation: what the
+// NTP samples, with the compensation taken off, are judged against.
+static int64_t model_utc(int64_t local_us)
 {
     int64_t elapsed = local_us - clock_state.anchor_local_us;
 
@@ -76,12 +80,24 @@ int64_t esp_clock_utc_us(int64_t local_us)
 }
 
 
+int64_t esp_clock_model_utc_us(int64_t local_us)
+{
+    return model_utc(local_us);
+}
+
+
+int64_t esp_clock_utc_us(int64_t local_us)
+{
+    return model_utc(local_us) + temp_comp_us(local_us);
+}
+
+
 int64_t esp_clock_local_us(int64_t utc_us)
 {
     int64_t local = clock_state.anchor_local_us + (utc_us - clock_state.anchor_utc_us);
     int pass;
 
-    // Newton steps: the model's slope is 1 to within a few hundred ppm.
+    // Newton steps: the clock's slope is 1 to within a few hundred ppm.
     for (pass = 0; pass < 3; pass++)
     {
         local -= esp_clock_utc_us(local) - utc_us;
@@ -269,9 +285,9 @@ EspClockAction esp_clock_update(const EspClockSample *sample, int64_t now_us,
         return ESP_CLOCK_STEPPED;
     }
 
-    error = sample->local_us + sample->offset_us - esp_clock_utc_us(sample->local_us);
+    error = sample->local_us + sample->offset_us - model_utc(sample->local_us);
     status->last_error_us = error;
-    utc_now = esp_clock_utc_us(now_us);
+    utc_now = model_utc(now_us);
     if (estimate != NULL)
     {
         // The estimate is for now: what is wrong at now, whatever the old
@@ -404,7 +420,7 @@ uint8_t esp_clock_window_samples(void)
 static int64_t bound_from(const RawSample *raw, int64_t local_us, int64_t drift_ppb)
 {
     int64_t age = local_us - raw->local_us;
-    int64_t deviation = esp_clock_utc_us(raw->local_us) + slewed(local_us) - slewed(raw->local_us) -
+    int64_t deviation = model_utc(raw->local_us) + slewed(local_us) - slewed(raw->local_us) -
                         (raw->local_us + raw->offset_us);
 
     if (age < 0)
@@ -468,8 +484,10 @@ bool esp_clock_correcting(int64_t local_us)
 
 int32_t esp_clock_period_adjust_q16(void)
 {
-    // A UTC second lasts 1e6 / (1 + f) local microseconds, about 1e6 x (1 - f).
-    return (int32_t)(-(int64_t)clock_state.status.frequency_ppb * 65536 / 1000);
+    // A UTC second lasts 1e6 / (1 + f) local microseconds, about 1e6 x (1 - f),
+    // f the model's and the temperature compensation's rates together.
+    return (int32_t)(-((int64_t)clock_state.status.frequency_ppb + temp_comp_rate_ppb()) * 65536 /
+                     1000);
 }
 
 

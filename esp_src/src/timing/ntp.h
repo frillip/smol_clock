@@ -58,6 +58,9 @@ bool ntp_is_valid(void);  // the clock has been set
 bool ntp_is_synced(void); // ... and recently updated
 // ntp.asymmetry (user_prefs.h) set: every sample from now on, and those
 // kept, moved by it, so the lines carry on. Out of range: false.
+// The board's temperature (the PIC's BME280, STAT-ENV), 0.01 C, as it
+// arrives: for the ESP crystal's temperature compensation (temp_comp.h).
+void ntp_board_temperature(int32_t centic);
 bool ntp_set_asymmetry(int32_t us);
 // The same for one server's ntp offset (0 DHCP's, 1 to 4), its own samples.
 bool ntp_set_offset(int server, int32_t us);

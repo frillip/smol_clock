@@ -15,6 +15,7 @@
 #include "../../src/timing/esp_clock.h"
 #include "../../src/timing/ntp.h"
 #include "../../src/timing/ntp_client.h"
+#include "../../src/timing/temp_comp.h"
 #include "../../src/timing/pps.h"
 
 static int failures, checks;
@@ -55,6 +56,8 @@ void console_printf(const char *format, ...)
 
 UserPrefs user_prefs;
 UserPrefsNtp user_prefs_ntp;
+UserPrefsTcomp user_prefs_esp_tcomp = {1, TEMP_COMP_NOT_SET, 0, 0};
+void user_prefs_save_tcomp_learnt(void) {}
 int32_t user_prefs_ntp_asymmetry_us;
 int32_t user_prefs_ntp_dhcp = NTP_DHCP_DISABLED; // on for its own section
 int32_t user_prefs_ntp_offset_us[NTP_SERVERS + 1];
@@ -244,6 +247,18 @@ static void run_s(int seconds)
         ntp_service(true);
         ntp_service(true); // the result, taken
     }
+}
+
+
+static uint32_t all_polls(void)
+{
+    uint32_t polls = 0;
+
+    for (int n = 0; n < 10; n++)
+    {
+        polls += fake[n].polls;
+    }
+    return polls;
 }
 
 
@@ -745,6 +760,66 @@ int main(void)
         CHECK(contains(out.out, "+/- over 4.29 s"));
         pps_on = false;
         user_prefs_set_string(user_prefs_ntp_server(2), "");
+    }
+
+    printf("Short polls while the board temperature moves, in at once\n");
+    {
+        user_prefs_esp_tcomp.learnt_ppb_per_c = -190; // learnt: no start's short polls
+        user_prefs_esp_tcomp.learnt_estimates = 3;
+        user_prefs.fields.ntp.interval = 1024;
+                ntp_init();
+        run_s(4 * 3600);
+        Stream before;
+        ntp_print_tracking(&before);
+        CHECK(!contains(before.out, "Interval:  128 s") && !contains(before.out, "short:"));
+        console.clear();
+        uint32_t at = all_polls();
+        // 1 C over 20 min, then steady.
+        for (int t = 0; t < 1200; t += 5)
+        {
+            ntp_board_temperature(3000 + t * 100 / 1200);
+            run_s(5);
+        }
+        Stream during;
+        ntp_print_tracking(&during);
+        printf("  %u polls in the 20 min of the move\n", all_polls() - at);
+        // Learnt (3 estimates): 256 s while it moves.
+        CHECK(contains(console, "NTP: short polls: temperature moving, 256 s\n"));
+        // At most 256 s: the adaptation may still go shorter.
+        CHECK((contains(during.out, "Interval:  256 s ") || contains(during.out, "Interval:  128 s ")) &&
+              contains(during.out, "(adaptive, at most 1024 s, short: temperature moving, 256 s)"));
+        CHECK(all_polls() - at >= 4);
+        for (int t = 0; t < 4500; t += 5)
+        {
+            ntp_board_temperature(3100);
+            run_s(5);
+        }
+        CHECK(contains(console, "NTP: short polls end\n"));
+        at = all_polls();
+        for (int t = 0; t < 7200; t += 5)
+        {
+            ntp_board_temperature(3100);
+            run_s(5);
+        }
+        printf("  %u polls in the 2 h after\n", all_polls() - at);
+        CHECK(all_polls() - at < 2 * 3600 / 128);
+
+        printf("  Not learnt yet: 128 s\n");
+        user_prefs_esp_tcomp.learnt_estimates = 1;
+        ntp_init();
+        run_s(4 * 3600);
+        console.clear();
+        for (int t = 0; t < 1200; t += 5)
+        {
+            ntp_board_temperature(3000 + t * 100 / 1200);
+            run_s(5);
+        }
+        Stream learning;
+        ntp_print_tracking(&learning);
+        CHECK(contains(console, "NTP: short polls: learning, 128 s\n"));
+        CHECK(contains(learning.out, "Interval:  128 s (adaptive, at most 1024 s, short: learning, 128 s)"));
+        user_prefs_esp_tcomp.learnt_ppb_per_c = 0;
+        user_prefs_esp_tcomp.learnt_estimates = 0;
     }
 
     printf("%d checks, %d failures\n", checks, failures);

@@ -18,6 +18,7 @@
 #include "ntp_select.h"
 #include "ntp_stats.h"
 #include "pps.h"
+#include "temp_comp.h"
 
 #define LEARN_FIRST_S     64U
 #define POLL_MIN_S        128U // adaptive range, once learnt: from here ...
@@ -122,6 +123,7 @@ typedef struct
     uint32_t max_interval_s; // ntp.interval: the longest poll interval
     uint32_t interval_s;     // the interval in use, adaptive below that
     double poll_score;       // chronyd's: the interval doubles at 1, halves below 0
+    TempCompPolls short_polls; // what was asked for at the last pass (temp_comp.h)
     bool report_ready;
     SML_TIME_NTP_PAYLOAD report;
     uint32_t edges;
@@ -180,6 +182,8 @@ static void reset_server(int index)
 void ntp_init(void)
 {
     esp_clock_init();
+    temp_comp_init();
+    temp_comp_restore(user_prefs_esp_tcomp.learnt_ppb_per_c, user_prefs_esp_tcomp.learnt_estimates);
     ntp_client_init();
     ntp.peer = -1;
     ntp.polling = -1;
@@ -190,6 +194,7 @@ void ntp_init(void)
     }
     ntp.max_interval_s = user_prefs.fields.ntp.interval;
     ntp.interval_s = POLL_START_S < ntp.max_interval_s ? POLL_START_S : ntp.max_interval_s;
+    ntp.short_polls = TEMP_COMP_POLLS_NORMAL;
 }
 
 
@@ -314,6 +319,21 @@ static void set_system_time(void)
 }
 
 
+// The longest poll temp_comp asks for, within the adaptive range; 0: none.
+static uint32_t short_polls_s(TempCompPolls polls)
+{
+    uint32_t cap = temp_comp_polls_s(polls);
+    uint32_t shortest = POLL_MIN_S < ntp.max_interval_s ? POLL_MIN_S : ntp.max_interval_s;
+
+    if (cap == 0)
+    {
+        return 0;
+    }
+    cap = cap < ntp.max_interval_s ? cap : ntp.max_interval_s;
+    return cap > shortest ? cap : shortest;
+}
+
+
 /*
  * The poll interval adapts between POLL_MIN_S and ntp.interval as chronyd
  * adapts it (ntp_core.c), on each sample from the server followed:
@@ -333,6 +353,15 @@ static void adapt_interval(int64_t error_us, int64_t distance_us, unsigned sampl
 {
     uint32_t longest = ntp.max_interval_s;
     uint32_t shortest = POLL_MIN_S < longest ? POLL_MIN_S : longest;
+
+    // While the temperature compensation starts out, or the temperature
+    // moves: shorter polls (temp_comp.h).
+    uint32_t cap = short_polls_s(temp_comp_short_polls(now_us()));
+
+    if (cap != 0)
+    {
+        longest = cap;
+    }
     uint32_t interval;
     double adjust;
 
@@ -506,7 +535,7 @@ static const EspClockSample *latest(const NtpServer *server)
 // of our error at the time it was taken.
 static int64_t against_clock(const EspClockSample *sample)
 {
-    return sample->local_us + sample->offset_us - esp_clock_utc_us(sample->local_us);
+    return sample->local_us + sample->offset_us - esp_clock_model_utc_us(sample->local_us);
 }
 
 
@@ -514,7 +543,7 @@ static int64_t against_clock(const EspClockSample *sample)
 // view of our error now.
 static int64_t line_against_clock(int index, int64_t now)
 {
-    return now + ntp_stats_offset_at(&server_stats[index], now) - esp_clock_utc_us(now);
+    return now + ntp_stats_offset_at(&server_stats[index], now) - esp_clock_model_utc_us(now);
 }
 
 
@@ -609,7 +638,7 @@ static void apply(int index)
     {
         // The combined offset is our error now: UTC - local is that plus
         // the model's.
-        estimate.offset_us = ntp.selection.combined_offset_us + esp_clock_utc_us(now) - now;
+        estimate.offset_us = ntp.selection.combined_offset_us + esp_clock_model_utc_us(now) - now;
         estimate.frequency_known = ntp.selection.frequency_known;
         estimate.frequency_ppb = (int32_t)llround(ntp.selection.combined_frequency_ppb);
         estimate.skew_ppb = (int32_t)(ntp.selection.combined_skew_ppb < 1e9
@@ -943,6 +972,13 @@ static void handle_poll(int index, const NtpPollResult *poll)
     // server's path.
     sample = poll->sample;
     sample.offset_us += user_prefs_ntp_asymmetry_us + user_prefs_ntp_offset_us[index];
+    if (index == ntp.peer)
+    {
+        temp_comp_learn(sample.local_us, sample.offset_us, sample.delay_us, index);
+    }
+    // The temperature compensation taken off: the lines and the model see
+    // what it does not explain (temp_comp.h).
+    sample.offset_us -= temp_comp_us(sample.local_us);
     server->measured_us = esp_clock_is_valid() ? against_clock(&sample) : 0;
     server->sample = sample;
     server->count++;
@@ -1098,13 +1134,14 @@ static void start_poll(int index, const IPAddress *address)
 
 
 /*
- * ntp.interval lowered: polls already scheduled under the old longest
- * interval would otherwise stand (a day, say, after going to 128 s). Each
- * one still to come is brought in by the ratio of the two, so they keep
- * their order and spread rather than all falling due at once, and none is
- * left further off than its interval now; retries' back-off is capped at it.
+ * The interval cut from old_s to new_s (ntp.interval lowered, or short
+ * polls asked for): polls already scheduled under the old one would
+ * otherwise stand (a day, say, after going to 128 s). Each one still to
+ * come is brought in by the ratio of the two, so they keep their order and
+ * spread rather than all falling due at once, and none is left further off
+ * than its interval now; retries' back-off is capped at it.
  */
-static void pull_polls_forward(uint32_t old_max_s)
+static void pull_polls_forward(uint32_t old_s, uint32_t new_s)
 {
     int64_t now = now_us();
 
@@ -1122,7 +1159,7 @@ static void pull_polls_forward(uint32_t old_max_s)
         {
             continue; // a refusal's week stands; overdue ones are due anyway
         }
-        left_us = left_us * (int64_t)ntp.max_interval_s / (int64_t)old_max_s;
+        left_us = left_us * (int64_t)new_s / (int64_t)old_s;
         server->next_poll_us = now + (left_us < limit_us ? left_us : limit_us);
     }
 }
@@ -1142,7 +1179,7 @@ static void check_settings(void)
         }
         if (ntp.max_interval_s < old_max_s)
         {
-            pull_polls_forward(old_max_s);
+            pull_polls_forward(old_max_s, ntp.max_interval_s);
         }
     }
     for (int index = 0; index < NTP_SLOTS; index++)
@@ -1368,11 +1405,84 @@ static int next_due(void)
 }
 
 
+// Short polls asked for (temp_comp.h): in at once, not from the next
+// adaptation, which could be an interval away. Their end needs nothing:
+// the interval lengthens from the next sample by the usual rule.
+static void short_polls_now(void)
+{
+    TempCompPolls polls = temp_comp_short_polls(now_us());
+    uint32_t cap = short_polls_s(polls);
+
+    if (polls != ntp.short_polls)
+    {
+        if (polls != TEMP_COMP_POLLS_NORMAL)
+        {
+            ntp_event("short polls: %s, %lu s\n", temp_comp_polls_name(polls), (unsigned long)cap);
+        }
+        else
+        {
+            ntp_event("short polls end\n");
+        }
+        ntp.short_polls = polls;
+    }
+    if (cap != 0 && ntp.interval_s > cap)
+    {
+        uint32_t old_s = ntp.interval_s;
+
+        ntp.interval_s = cap;
+        ntp.poll_score = 0.0;
+        pull_polls_forward(old_s, cap);
+    }
+}
+
+
+// What the temperature compensation learns, into NVS: the first at once,
+// then at most hourly (flash wear), the latest then.
+#define TCOMP_SAVE_US (3600LL * 1000000)
+
+static void keep_learnt(int64_t now)
+{
+    static int64_t saved_us;
+    static bool pending;
+    int32_t ppb_per_c, estimates;
+
+    if (temp_comp_take_learnt(&ppb_per_c, &estimates))
+    {
+        user_prefs_esp_tcomp.learnt_ppb_per_c = ppb_per_c;
+        user_prefs_esp_tcomp.learnt_estimates = estimates;
+        ntp_event("crystal %+ld ppb/C learnt (%ld estimates)\n", (long)ppb_per_c,
+                  (long)estimates);
+        pending = true;
+        if (estimates == 1)
+        {
+            saved_us = now - TCOMP_SAVE_US;
+        }
+    }
+    if (pending && now - saved_us >= TCOMP_SAVE_US)
+    {
+        user_prefs_save_tcomp_learnt();
+        saved_us = now;
+        pending = false;
+    }
+}
+
+
+void ntp_board_temperature(int32_t centic)
+{
+    temp_comp_temperature(now_us(), centic);
+}
+
+
 void ntp_service(bool network_up)
 {
     NtpServer *server;
     int index;
+    int64_t now = now_us();
 
+    temp_comp_configure(now, user_prefs_esp_tcomp.enabled != 0, user_prefs_esp_tcomp.set_ppb_per_c);
+    temp_comp_service(now);
+    keep_learnt(now);
+    short_polls_now();
     check_settings();
     take_result(network_up);
     service_pps();
@@ -1801,8 +1911,16 @@ void ntp_print_tracking(Stream *output)
         output->printf(", done");
     }
     output->printf(" (%lu fast)\n", (unsigned long)status->fast_slews);
-    output->printf("Interval:  %lu s (adaptive, at most %lu s)\n", (unsigned long)ntp.interval_s,
+    TempCompPolls polls = temp_comp_short_polls(now_us());
+
+    output->printf("Interval:  %lu s (adaptive, at most %lu s", (unsigned long)ntp.interval_s,
                    (unsigned long)ntp.max_interval_s);
+    if (polls != TEMP_COMP_POLLS_NORMAL)
+    {
+        output->printf(", short: %s, %lu s", temp_comp_polls_name(polls),
+                       (unsigned long)short_polls_s(polls));
+    }
+    output->printf(")\n");
     // The corrections set by hand: ntp asymmetry, then each ntp server offset.
     output->printf("Asymmetry: %+ld us", (long)user_prefs_ntp_asymmetry_us);
     for (int server = 0; server < NTP_SLOTS; server++)

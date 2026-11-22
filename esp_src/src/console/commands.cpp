@@ -16,6 +16,7 @@
 #include "../settings/user_prefs.h"
 #include "../timing/ntp.h"
 #include "../timing/ntp_gnss.h"
+#include "../timing/temp_comp.h"
 #include "../tz/leap.h"
 #include "../tz/tzinfo.h"
 #include "../util/loop_timing.h"
@@ -1761,12 +1762,116 @@ static void esp_action(Stream *output, const Entry *entry, const Value *value)
     }
 }
 
+// 0.01 units as d.dd, signed.
+static void print_centi_value(Stream *output, int32_t value)
+{
+    uint32_t magnitude = (uint32_t)(value < 0 ? -(int64_t)value : value);
+
+    output->printf("%s%lu.%02lu", value < 0 ? "-" : "", (unsigned long)(magnitude / 100U),
+                   (unsigned long)(magnitude % 100U));
+}
+
+// The ESP crystal's temperature compensation: shown, set by hand (ppb/C),
+// on, off, back to learning (the setting cleared), or reset (on, nothing set
+// or learnt). Settings saved with "esp save"; what is learnt saves itself.
+static void esp_tcomp(Stream *output, const Entry *entry, const Value *value)
+{
+    const TempCompStatus *comp = temp_comp_status();
+    int64_t now = esp_timer_get_time();
+
+    (void)entry;
+    if (value->given)
+    {
+        if (value->choice == 0 || value->choice == 1)
+        {
+            user_prefs_esp_tcomp.enabled = value->choice == 0;
+        }
+        else if (value->choice == 2)
+        {
+            user_prefs_esp_tcomp.enabled = 1;
+            user_prefs_esp_tcomp.set_ppb_per_c = TEMP_COMP_NOT_SET;
+            user_prefs_esp_tcomp.learnt_ppb_per_c = 0;
+            user_prefs_esp_tcomp.learnt_estimates = 0;
+            temp_comp_forget(now);
+            user_prefs_save_tcomp_learnt();
+        }
+        else if (value->choice == 3)
+        {
+            user_prefs_esp_tcomp.set_ppb_per_c = TEMP_COMP_NOT_SET;
+        }
+        else
+        {
+            user_prefs_esp_tcomp.set_ppb_per_c = (int32_t)value->number;
+        }
+        // In force at once, as ntp_service() would at its next pass.
+        temp_comp_configure(now, user_prefs_esp_tcomp.enabled != 0,
+                            user_prefs_esp_tcomp.set_ppb_per_c);
+    }
+    output->printf("esp tcomp: %s, %+ld ppb/C (%s); %s", user_prefs_esp_tcomp.enabled ? "ON" : "OFF",
+                   (long)comp->ppb_per_c, temp_comp_source_name(comp->source),
+                   temp_comp_state_name(comp->state));
+    if (comp->temperature_known)
+    {
+        output->printf(", board ");
+        print_centi_value(output, comp->temperature_centic);
+        output->printf(" C");
+    }
+    if (comp->reference_known)
+    {
+        output->printf(", reference ");
+        print_centi_value(output, comp->reference_centic);
+        output->printf(" C");
+    }
+    // The crystal against the reference, + = fast: the rate's other sense.
+    output->printf(", crystal %+lld ppb, correction %+lld us\n", (long long)-comp->rate_ppb,
+                   (long long)temp_comp_us(now));
+
+    // Learning: what is learnt, the latest fit, the window.
+    output->printf("esp tcomp learning: %ld estimates", (long)comp->estimates);
+    if (comp->estimates > 0)
+    {
+        output->printf(", learnt %+.1f ppb/C", comp->learnt_ppb_per_c);
+    }
+    if (comp->last_local_us != 0)
+    {
+        output->printf(", last %+.1f +/- %.1f ppb/C over ", comp->last_ppb_per_c,
+                       comp->last_se_ppb);
+        print_centi_value(output, comp->last_range_centic);
+        output->printf(" C (");
+        print_centi_value(output, comp->last_turn_centic);
+        output->printf(" C each way), r %.2f, %lld min ago", comp->last_rho,
+                       (long long)((now - comp->last_local_us) / 60000000LL));
+    }
+    if (comp->accepted_local_us != 0 && now - comp->accepted_local_us < TEMP_COMP_LEARN_NEW_US)
+    {
+        output->printf(", next in %lld min",
+                       (long long)((comp->accepted_local_us + TEMP_COMP_LEARN_NEW_US - now) / 60000000LL));
+    }
+    output->printf(", window %d samples over ", comp->window);
+    print_centi_value(output, comp->window_range_centic);
+    output->printf(" C, moved ");
+    print_centi_value(output, comp->moved_centic);
+    output->printf(" C in %d min", comp->minutes < TEMP_COMP_MOVING_MINUTES + 1
+                                       ? (comp->minutes > 0 ? comp->minutes - 1 : 0)
+                                       : TEMP_COMP_MOVING_MINUTES);
+    TempCompPolls polls = temp_comp_short_polls(now);
+    if (polls != TEMP_COMP_POLLS_NORMAL)
+    {
+        output->printf(", short polls (%s, %lu s)", temp_comp_polls_name(polls),
+                       (unsigned long)temp_comp_polls_s(polls));
+    }
+    output->printf("\n");
+}
+
 static const Entry esp_entries[] = {
     {"save", VALUE_NONE, NULL, 0, 0, "", "Save the ESP's settings", esp_action},
     {"defaults", VALUE_NONE, NULL, 0, 0, "", "The ESP's default settings, not saved", esp_action},
     {"reset", VALUE_NONE, NULL, 0, 0, "", "Restart the ESP", esp_action},
     {"factory", VALUE_NONE, NULL, 0, 0, "", "Default settings saved, Wi-Fi forgotten, and restart",
      esp_action},
+    {"tcomp", VALUE_NUMBER, "on off reset learn", -TEMP_COMP_MAX_PPB_PER_C,
+     TEMP_COMP_MAX_PPB_PER_C, "on|off|reset|learn|<ppb/C>", "Crystal temperature compensation (+ = fast when warmer)",
+     esp_tcomp},
 };
 
 // ---- The nouns ----------------------------------------------------------------------
