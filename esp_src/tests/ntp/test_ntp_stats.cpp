@@ -127,8 +127,9 @@ int main(void)
     // The best sample for distance is a fast one.
     CHECK(ntp_stats_distance_us(&stats, 128 * 39 * 1000000LL) < 20 + 250 + 100);
 
-    // The frequency changes by 2 ppm 12 samples back: the runs test drops
-    // the samples before it, so the line follows the new frequency.
+    // The frequency changes by 2 ppm 12 samples back, at 512 s polls: the
+    // runs test drops the samples before it, so the line follows the new
+    // frequency.
     srand(3);
     ntp_stats_reset(&stats);
     {
@@ -138,8 +139,8 @@ int main(void)
         {
             NtpStatsSample s;
 
-            offset += (i < 52 ? 1.0 : 3.0) * 128.0;
-            s = at(128 * i, offset + 5.0 * gaussian(), 500);
+            offset += (i < 52 ? 1.0 : 3.0) * 512.0;
+            s = at(512 * i, offset + 5.0 * gaussian(), 500);
             ntp_stats_add(&stats, &s);
         }
     }
@@ -148,6 +149,46 @@ int main(void)
     CHECK(fabs(stats.frequency_ppb - 3000.0) < 150.0);
     CHECK(stats.used <= 13 && stats.samples == stats.used);
     CHECK(stats.runs_samples <= stats.samples);
+
+    // At 128 s polls the path shifts by 200 us for three polls, then
+    // returns. Asked for the least span (the crystal compensated), the line
+    // is not cut to the shift and what follows it, so its slope stays near
+    // the crystal's; without, as chronyd, it is, and tilts.
+    printf("  a path shifted for three polls at 128 s:");
+    for (int spanned = 1; spanned >= 0; spanned--)
+    {
+        double worst = 0.0;
+        uint8_t least = NTP_STATS_MAX_SAMPLES;
+
+        srand(5);
+        ntp_stats_reset(&stats);
+        stats.min_span_s = spanned ? NTP_STATS_MIN_SPAN_S : 0.0f;
+        for (int i = 0; i < 40; i++)
+        {
+            double offset = 1.0 * 128.0 * i + (i >= 24 && i < 27 ? 200.0 : 0.0);
+            NtpStatsSample s = at(128 * i, offset + 20.0 * gaussian(), 500);
+
+            ntp_stats_add(&stats, &s);
+            if (i >= 24)
+            {
+                double error = fabs(stats.frequency_ppb - 1000.0);
+
+                worst = error > worst ? error : worst;
+                least = stats.used < least ? stats.used : least;
+            }
+        }
+        printf(" %s, slope off by %.0f ppb at most, %u samples at least;",
+               spanned ? "spanned" : "not", worst, least);
+        if (spanned)
+        {
+            CHECK(worst < 200.0 && least * 128.0 > NTP_STATS_MIN_SPAN_S);
+        }
+        else
+        {
+            CHECK(worst > 300.0 && least == NTP_STATS_MIN_SAMPLES);
+        }
+    }
+    printf("\n");
 
     // Never fewer than NTP_STATS_MIN_SAMPLES after pruning, and the ring
     // wraps cleanly over many samples.
@@ -161,7 +202,8 @@ int main(void)
         NtpStatsSample s = at(128 * i, offset + 20.0 * gaussian(), 500 + (uint32_t)(rand() % 300));
 
         ntp_stats_add(&stats, &s);
-        if ((stats.added >= NTP_STATS_MIN_SAMPLES && stats.used < NTP_STATS_MIN_SAMPLES) || stats.samples + stats.runs_samples > NTP_STATS_RING)
+        if ((stats.added >= NTP_STATS_MIN_SAMPLES && stats.used < NTP_STATS_MIN_SAMPLES) ||
+            stats.samples + stats.runs_samples > NTP_STATS_RING)
         {
             printf("  at %d: used %u samples %u runs %u\n", i, stats.used, stats.samples, stats.runs_samples);
             CHECK(false);

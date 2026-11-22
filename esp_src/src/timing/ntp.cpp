@@ -882,6 +882,9 @@ static bool add_to_stats(int index, const EspClockSample *sample, int64_t *off_l
     entry.offset_us = sample->offset_us;
     entry.delay_us = sample->delay_us < 0 ? 0U : (uint32_t)sample->delay_us;
     entry.server_us = sample->root_delay_us / 2U + sample->root_dispersion_us;
+    // With the crystal compensated, it moves little in half an hour: no
+    // shorter line, which a few polls over a shifted path would tilt.
+    stats->min_span_s = temp_comp_status()->state == TEMP_COMP_ACTIVE ? NTP_STATS_MIN_SPAN_S : 0.0f;
     ntp_stats_add(stats, &entry);
     return joined;
 }

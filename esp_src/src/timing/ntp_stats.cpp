@@ -197,7 +197,7 @@ typedef struct
  * valid (the runs samples), w only from 0. False with too few samples.
  */
 static bool best_line(const double *x, const double *y, const double *w, int n, int extra,
-                      Line *line)
+                      double min_span_s, Line *line)
 {
     double residuals[NTP_STATS_RING];
     double P, Q, U, V, W, u, a = 0.0, b = 0.0;
@@ -245,8 +245,10 @@ static bool best_line(const double *x, const double *y, const double *w, int n, 
             residuals[i - first] = y[i] - a - b * x[i];
         }
         runs = count_runs(residuals, n - first);
+        // x is seconds back from the latest sample: dropping one more would
+        // leave the line from start + 1.
         if (runs > ntp_stats_critical_runs(n - first) || n - start <= NTP_STATS_MIN_REGRESS ||
-            n - start <= NTP_STATS_MIN_SAMPLES)
+            n - start <= NTP_STATS_MIN_SAMPLES || x[n - 1] - x[start + 1] < min_span_s)
         {
             if (start != first)
             {
@@ -352,7 +354,7 @@ void ntp_stats_regress(NtpStats *stats)
         w[i] = weight * weight;
     }
 
-    stats->fitted = best_line(x + extra, y + extra, w, n, extra, &line);
+    stats->fitted = best_line(x + extra, y + extra, w, n, extra, stats->min_span_s, &line);
     stats->offset_local_us = latest->local_us;
     if (stats->fitted)
     {

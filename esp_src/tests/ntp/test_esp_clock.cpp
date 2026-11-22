@@ -40,6 +40,10 @@ typedef struct
     double burst_share;  // exchanges Wi-Fi holds up ...
     double burst_us;     // ... by up to this, all one way
     int interval_s;
+    double shift_us;     // the path shifted by this, one way, ...
+    int shift_polls;     // ... for this many polls ...
+    int shift_every_s;   // ... this often (as seen 2026-11-22 on the LAN)
+    bool compensated;    // temp_comp active: lines at least NTP_STATS_MIN_SPAN_S long
 } Scenario;
 
 typedef struct
@@ -85,6 +89,12 @@ static Result run(const Scenario *s, bool lines, unsigned seed)
             double lopsided = s->worst ? 1.0 : (2.0 * uniform() - 1.0) * s->asymmetry;
             double offset = truth + lopsided * delay / 2.0;
 
+            if (s->shift_every_s > 0 && local > 3600 &&
+                local % s->shift_every_s < (int64_t)s->shift_polls * s->interval_s)
+            {
+                offset += s->shift_us;
+            }
+
             if (uniform() < s->burst_share)
             {
                 // Held up one way: the offset is off by half the extra.
@@ -105,6 +115,7 @@ static Result run(const Scenario *s, bool lines, unsigned seed)
                                         15 / 2 + 15};
                 EspClockEstimate estimate;
 
+                stats.min_span_s = s->compensated ? NTP_STATS_MIN_SPAN_S : 0.0f;
                 ntp_stats_add(&stats, &entry);
                 estimate.offset_us = ntp_stats_offset_at(&stats, sample.local_us);
                 estimate.frequency_known = stats.fitted;
@@ -155,26 +166,36 @@ static Result run(const Scenario *s, bool lines, unsigned seed)
 int main(void)
 {
     static const Scenario scenarios[] = {
-        {"LAN, steady, 512 s", -2.9, 0.0, 21600, 0.0, 2500, 500, 0.3, false, 0.0, 0, 512},
+        {"LAN, steady, 512 s", -2.9, 0.0, 21600, 0.0, 2500, 500, 0.3, false, 0.0, 0, 512, 0.0, 0, 0, false},
         {"LAN, wander 0.2 ppm / 6 h, 512 s", -2.9, 0.2, 21600, 0.0, 2500, 500, 0.3, false, 0.0, 0,
          512},
         {"LAN, wander, 0.4 ppm step, 512 s", 0.9, 0.2, 21600, 0.4, 2500, 500, 0.3, false, 0.0, 0,
          512},
         {"Internet, lopsided at random, 512 s", 1.0, 0.1, 21600, 0.0, 10000, 3000, 1.0, false, 0.0,
-         0, 512},
+         0, 512, 0.0, 0, 0, false},
         {"Internet, always lopsided, 512 s", 1.0, 0.1, 21600, 0.0, 10000, 3000, 1.0, true, 0.0, 0,
          512},
-        {"LAN, wander, 1024 s", -2.9, 0.2, 21600, 0.0, 2500, 500, 0.3, false, 0.0, 0, 1024},
+        {"LAN, wander, 1024 s", -2.9, 0.2, 21600, 0.0, 2500, 500, 0.3, false, 0.0, 0, 1024, 0.0, 0, 0, false},
         // As seen: the crystal swinging 0.5 ppm over an hour, a tenth of the
         // exchanges held up by Wi-Fi by up to 10 ms.
         {"LAN, Wi-Fi bursts, swinging, 128 s", -2.9, 0.5, 3600, 0.0, 2500, 500, 0.1, false, 0.1,
-         10000, 128},
+         10000, 128, 0.0, 0, 0, false},
         {"LAN, Wi-Fi bursts, swinging, 512 s", -2.9, 0.5, 3600, 0.0, 2500, 500, 0.1, false, 0.1,
-         10000, 512},
+         10000, 512, 0.0, 0, 0, false},
         {"LAN, Wi-Fi bursts, slow wander, 128 s", -2.9, 0.2, 21600, 0.0, 2500, 500, 0.1, false, 0.1,
-         10000, 128},
+         10000, 128, 0.0, 0, 0, false},
         {"LAN, Wi-Fi bursts, slow wander, 512 s", -2.9, 0.2, 21600, 0.0, 2500, 500, 0.1, false, 0.1,
-         10000, 512},
+         10000, 512, 0.0, 0, 0, false},
+        // As seen 2026-11-22: the path shifting by 200 us for a few polls,
+        // every hour or two, with the crystal compensated. Cut to the shift
+        // by the runs test, the lines rang the clock (with no least span:
+        // RMS 70 / 103 us, worst 274 / 433 us for 3 / 6 polls at 128 s).
+        {"LAN, path shifts 200 us x 3 polls, 128 s", -2.9, 0.2, 21600, 0.0, 2300, 800, 0.1, false,
+         0.05, 10000, 128, 200, 3, 7200, true},
+        {"LAN, path shifts 200 us x 6 polls, 128 s", -2.9, 0.2, 21600, 0.0, 2300, 800, 0.1, false,
+         0.05, 10000, 128, 200, 6, 5400, true},
+        {"LAN, path shifts 200 us x 1 poll, 512 s", -2.9, 0.2, 21600, 0.0, 2300, 800, 0.1, false,
+         0.05, 10000, 512, 200, 1, 7200, true},
     };
     unsigned seed = 7;
 
