@@ -88,7 +88,7 @@ class KeepTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
-    def run_main(self, argv, live):
+    def run_main(self, argv, live, settings=None, check=None):
         calls = []
         with mock.patch.object(release, "source_version", sources), \
                 mock.patch.object(release, "say", lambda text: None), \
@@ -96,7 +96,8 @@ class MainTest(unittest.TestCase):
                 mock.patch.object(release, "check_clean", lambda allow: None), \
                 mock.patch.object(release, "head_commit", lambda: "0" * 40), \
                 mock.patch.object(release, "need", lambda tool, why: tool), \
-                mock.patch.object(release, "load_settings", lambda: {}), \
+                mock.patch.object(release, "load_settings", lambda: settings or {}), \
+                mock.patch.object(release.upload_dist, "check", check or (lambda s: "scp")), \
                 mock.patch.object(release, "live_manifest", lambda url, path, dry: live), \
                 mock.patch.object(release.run_tests, "main", lambda a: calls.append("tests") or 0), \
                 mock.patch.object(release, "build_esp", lambda s, d: calls.append("esp")), \
@@ -115,6 +116,15 @@ class MainTest(unittest.TestCase):
         self.assertTrue(any(isinstance(c, tuple) and "dspic_src" in c for c in calls))
         self.assertFalse(any(isinstance(c, tuple) and "dspic_spl" in c and
                              os.path.isfile(release.make_dist.SPL_HEX) for c in calls))
+
+    def test_upload_checked_before_anything_is_built(self):
+        # The real check: no target set, so it stops at step 1.
+        code, calls = self.run_main(["--allow-dirty"], json.dumps(manifest()).encode(),
+                                    check=release.upload_dist.check)
+        self.assertEqual((code, calls), (1, []))
+        code, calls = self.run_main(["--allow-dirty", "--no-upload"], json.dumps(manifest()).encode(),
+                                    check=release.upload_dist.check)
+        self.assertEqual(code, 0)
 
     def test_allow_dirty_builds_everything(self):
         code, calls = self.run_main(["--allow-dirty"], json.dumps(manifest()).encode())

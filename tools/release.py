@@ -27,10 +27,12 @@ In order, stopping at the first failure:
     them (production); a PIC project also when its build is missing, the IPL
     only when none is released (dspic_ipl/release/).
  5. make_dist.py: the release files and the manifest, as before.
- 6. The upload, with OpenSSH's sftp (in Windows 10 and 11, and every Linux
-    and macOS): the files first, the manifest last, written beside the old
-    one and renamed over it, so no clock reads a manifest naming a file that
-    is not there yet, or half a manifest.
+ 6. The upload, by upload_dist.py (also run on its own): WinSCP on
+    Windows, OpenSSH's sftp elsewhere, SFTP only (a chrooted SFTP-only
+    account will do), public-key authentication only. The files first, the
+    manifest last, written beside the old one and renamed over it, so no
+    clock reads a manifest naming a file that is not there yet, or half a
+    manifest.
  7. Each file and the manifest downloaded back over HTTPS and compared.
  8. With --tag, a GitHub release of this commit with the files attached
     (the GitHub CLI, gh). The commit must be on GitHub already.
@@ -40,14 +42,18 @@ Settings for this machine, in tools/release.local.json (not in git):
   {
     "upload": "user@rubidium.darksky.io:/var/www/smol_clock/v2plus",
     "ssh_port": 22,
+    "ssh_key": "C:/Users/me/.ssh/rubidium.ppk",
+    "upload_method": "auto",
+    "hostkey": "SHA256:...",
     "arduino_cli": "arduino-cli",
     "mplabx": "C:/Program Files/Microchip/MPLABX/v6.20",
     "make": "make"
   }
 
 "upload" is the folder the base URL (make_dist.py --base-url) serves, as
-user@host:path; the SSH key is the one ssh uses (ssh-agent, or
-~/.ssh/config). The rest are optional: arduino_cli defaults to the one on
+user@host:path. The upload's own settings (ssh_key, upload_method, winscp,
+hostkey) are upload_dist.py's: its help explains them. The rest are
+optional: arduino_cli defaults to the one on
 the PATH, mplabx to the newest MPLAB X installed in its usual place, make
 to MPLAB X's own on Windows and to the PATH's elsewhere. --dry-run prints
 what would be run and uploaded, and runs and uploads nothing.
@@ -61,7 +67,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import urllib.error
 import urllib.request
 
@@ -71,6 +76,7 @@ sys.path.insert(0, TOOLS)
 import make_dist  # noqa: E402
 import make_manifest  # noqa: E402
 import run_tests  # noqa: E402
+import upload_dist  # noqa: E402
 
 SETTINGS = os.path.join(TOOLS, "release.local.json")
 ESP_SKETCH = os.path.join(ROOT, "esp_src")
@@ -373,58 +379,13 @@ def verify(base_url, dist, files, manifest):
         say("ok  %s" % relative)
 
 
-# ---- 6. The upload -------------------------------------------------------------
+# ---- 6. The upload: upload_dist.py -------------------------------------------
 
-def quote(path):
-    if '"' in path:
-        raise ReleaseError("%r: a path with a quote in it" % path)
-    return '"%s"' % path
-
-
-def upload(settings, dist, files, manifest, dry):
-    target = settings.get("upload")
-    if not target or ":" not in target:
-        raise ReleaseError("no \"upload\": \"user@host:/folder\" in %s" % os.path.relpath(SETTINGS, ROOT))
-    host, remote = target.split(":", 1)
-    remote = remote.rstrip("/") or "."
-    sftp = need("sftp", "OpenSSH's sftp, for the upload")
-    lines = []
-    folders = set()
-    for path in files:
-        relative = os.path.relpath(path, dist).replace(os.sep, "/")
-        parts = relative.split("/")[:-1]
-        for depth in range(len(parts) + 1):
-            folders.add("/".join([remote] + parts[:depth]))
-    # "-" ahead: carry on if the folder is there already.
-    lines += ["-mkdir " + quote(folder) for folder in sorted(folders, key=len)]
-    for path in files:
-        relative = os.path.relpath(path, dist).replace(os.sep, "/")
-        lines.append("put %s %s" % (quote(path.replace(os.sep, "/")), quote(remote + "/" + relative)))
-    # The manifest last, beside the old one, then over it in one step:
-    # OpenSSH's sftp renames with posix-rename, which replaces the target.
-    lines.append("put %s %s" % (quote(manifest.replace(os.sep, "/")),
-                                quote(remote + "/manifest.json.new")))
-    lines.append("rename %s %s" % (quote(remote + "/manifest.json.new"),
-                                   quote(remote + "/manifest.json")))
-    say("\n".join("  " + line for line in lines))
-    command = [sftp, "-b", "-"]
-    if settings.get("ssh_port"):
-        command += ["-P", str(settings["ssh_port"])]
-    command.append(host)
-    say("$ " + " ".join(command))
-    if dry:
-        return
-    batch = tempfile.NamedTemporaryFile("w", suffix=".sftp", delete=False, encoding="utf-8")
+def upload(settings, dist, files, manifest, dry, force=False):
     try:
-        batch.write("\n".join(lines) + "\n")
-        batch.close()
-        with open(batch.name, "rb") as handle:
-            code = subprocess.call(command, stdin=handle)
-    finally:
-        os.unlink(batch.name)
-    if code != 0:
-        raise ReleaseError("the upload failed (sftp exit %d): the manifest is only replaced last, "
-                           "so the clocks still see the old one" % code)
+        upload_dist.upload(settings, dist, files, manifest, dry, force=force)
+    except upload_dist.UploadError as error:
+        raise ReleaseError(str(error))
 
 
 # ---- 8. GitHub -----------------------------------------------------------------
@@ -452,6 +413,8 @@ def main(argv=None):
     parser.add_argument("--skip-build", action="store_true", help="release the builds there now")
     parser.add_argument("--no-esp", action="store_true", help="the PIC's files only")
     parser.add_argument("--no-upload", action="store_true", help="stop after dist/")
+    parser.add_argument("--force-upload", action="store_true",
+                        help="upload every file, even those the server has already")
     parser.add_argument("--no-verify", action="store_true", help="no download afterwards")
     parser.add_argument("--allow-dirty", action="store_true", help="uncommitted changes allowed, and every component built and released whatever its version")
     parser.add_argument("--dry-run", action="store_true", help="print, run nothing, upload nothing")
@@ -467,7 +430,10 @@ def main(argv=None):
         commit = head_commit()
         say("commit %s" % commit)
         if not args.no_upload:
-            need("sftp", "OpenSSH's sftp, for the upload")
+            try:
+                say("upload by %s" % upload_dist.check(settings))
+            except upload_dist.UploadError as error:
+                raise ReleaseError(str(error))
         if args.tag:
             need("gh", "the GitHub CLI, for --tag")
 
@@ -543,7 +509,7 @@ def main(argv=None):
             say("\nnot uploaded (--no-upload): dist/ is ready")
             return 0
         step("6. Upload")
-        upload(settings, dist_args.dist, files, manifest, dry)
+        upload(settings, dist_args.dist, files, manifest, dry, args.force_upload)
 
         if not args.no_verify:
             step("7. Served as uploaded")

@@ -11,7 +11,7 @@ configuration in dist/manifest.json:
 
   make_dist.py [--config NAME] [--base-url URL] [--dist DIR] [--manifest FILE]
                [--device MAC ...] [--ipl HEX] [--spl HEX] [--app HEX]
-               [--esp BIN] [--no-esp]
+               [--esp BIN] [--no-esp] [--check]
 
 --config is the ESP's "update config": the manifest's configuration for it,
 and the folder its files go in, <base URL><config>/. Without it (or with
@@ -34,6 +34,19 @@ dspic_src/platform/version.h), as make_image.py reads them; a header changed
 after its build is reported, as the build is then stale. Each file is named
 after the version read back from the file written.
 
+Each component is compared with what the manifest offered this
+configuration before. A different build under the same version is warned
+of: a clock already at that version keeps what it has ("update install"
+takes only newer versions; "update esp|pic|spl force" installs it anyway).
+Bump the version, or force it on the clocks that should have it.
+
+--check writes nothing: it compares the builds with what the manifest
+offers this configuration (--manifest a file, by default dist/manifest.json,
+or an http(s) URL such as the live one) and prints, for each component,
+whether the manifest offers this build. It exits 0 when it offers all of
+them, 1 when it does not: a build not yet put in the manifest, or a
+manifest not yet uploaded.
+
 Paths default to the MPLAB X production builds and the Arduino build folder,
 from the repository root, wherever this is run from. The IPL is the newest
 released one in dspic_ipl/release/ (ipl-X.Y.Z.hex) when there is one, copied
@@ -41,10 +54,13 @@ as it was released, so every first-installation hex carries the same IPL
 bits; else the IPL's production build, made into a release hex here.
 """
 import argparse
+import json
 import os
 import re
 import shutil
 import sys
+import tempfile
+import urllib.request
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(TOOLS, ".."))
@@ -133,6 +149,61 @@ def normal_mac(text):
     return ":".join(digits[index:index + 2] for index in range(0, 12, 2))
 
 
+COMPONENTS = (("esp", "ESP"), ("pic", "application"), ("pic_spl", "SPL"))
+UPDATE_NAMES = {"esp": "esp", "pic": "pic", "pic_spl": "spl"}
+
+
+def offered(manifest, config, devices):
+    """The configuration a manifest offers this target (as make_manifest
+    replaces it), or None."""
+    probe = {"hardware": "v2", "config": config}
+    if devices:
+        probe["devices"] = devices
+    for entry in manifest.get("configurations", []) if isinstance(manifest, dict) else []:
+        if make_manifest.same_target(entry, probe):
+            return entry
+    return None
+
+
+def compare(old, new):
+    """Each component of the new configuration against the old: a list of
+    (key, state, text), state one of "same" (the same build), "version"
+    (another version), "rebuild" (another build under the same version),
+    "new" (not offered before) or "gone" (offered before, not now)."""
+    found = []
+    for key, what in COMPONENTS:
+        before = (old or {}).get(key)
+        now = new.get(key)
+        if now is None:
+            if before is not None:
+                found.append((key, "gone", "%s %s offered before, not now" % (what, before["version"])))
+            continue
+        if before is None:
+            found.append((key, "new", "%s %s, not offered before" % (what, now["version"])))
+        elif before.get("sha256") == now["sha256"]:
+            found.append((key, "same", "%s %s, the build offered" % (what, now["version"])))
+        elif before.get("version") != now["version"]:
+            found.append((key, "version", "%s %s, was %s" % (what, now["version"], before["version"])))
+        else:
+            found.append((key, "rebuild", "%s %s: another build under the same version: clocks at %s "
+                          "keep theirs (update %s force installs it), or bump the version"
+                          % (what, now["version"], now["version"],
+                             UPDATE_NAMES[key])))
+    return found
+
+
+def load_manifest(where):
+    """A manifest from a file or an http(s) URL; None if the file is not
+    there."""
+    if re.match(r"https?://", where):
+        with urllib.request.urlopen(where, timeout=15) as response:
+            return json.loads(response.read().decode())
+    if not os.path.exists(where):
+        return None
+    with open(where) as handle:
+        return json.load(handle)
+
+
 def build(args):
     folder = folder_of(args.config)
     if args.device:
@@ -200,6 +271,7 @@ def build(args):
 
     # This configuration in the manifest, the others kept.
     manifest_path = args.manifest or os.path.join(args.dist, "manifest.json")
+    before = offered(load_manifest(manifest_path) or {}, args.config, args.device)
     command = ["--base-url", base_url, "--pic", app_path, "--pic-spl", spl_path, "-o", manifest_path]
     if os.path.exists(manifest_path):
         command += ["--merge", manifest_path]
@@ -211,6 +283,10 @@ def build(args):
         command += ["--device", device]
     if make_manifest.main(command) != 0:
         raise DistError("the manifest was not written")
+    for key, state, text in compare(before, offered(load_manifest(manifest_path), args.config,
+                                                    args.device)):
+        if state == "rebuild":
+            warn(text)
     made.append((manifest_path, "configuration %s%s, files at %s" % (
         repr(args.config) if args.config else "DEFAULT",
         " for " + ", ".join(args.device) if args.device else "", base_url)))
@@ -236,6 +312,8 @@ def parse_args(argv=None):
     parser.add_argument("--app", default=APP_HEX, help="the application's production hex")
     parser.add_argument("--esp", default=ESP_BIN, help="the ESP's image (Arduino's build folder)")
     parser.add_argument("--no-esp", action="store_true", help="leave the ESP out")
+    parser.add_argument("--check", action="store_true",
+                        help="write nothing: does the manifest (--manifest, a file or URL) offer these builds?")
     args = parser.parse_args(argv)
     if args.config.lower() == "default":
         args.config = ""
@@ -244,8 +322,41 @@ def parse_args(argv=None):
     return args
 
 
+def check(args):
+    """The builds against what the manifest offers: 0 if it offers them all."""
+    if args.device:
+        args.device = sorted(set(normal_mac(device) for device in args.device))
+    where = args.manifest or os.path.join(args.dist, "manifest.json")
+    manifest = load_manifest(where)
+    if manifest is None:
+        raise DistError("%s: no manifest there" % where)
+    old = offered(manifest, args.config, args.device)
+    with tempfile.TemporaryDirectory() as scratch:
+        made = argparse.Namespace(**vars(args))
+        made.dist = scratch
+        made.manifest = os.path.join(scratch, "manifest.json")
+        build(made)
+        new = offered(load_manifest(made.manifest), args.config, args.device)
+    found = compare(old, new)
+    print("%s, configuration %s%s:" % (where, repr(args.config) if args.config else "DEFAULT",
+                                       " for " + ", ".join(args.device) if args.device else ""))
+    for key, state, text in found:
+        print("  %-8s %s" % ("ok" if state == "same" else state.upper(), text))
+    if any(state != "same" for key, state, text in found):
+        print("The manifest does not offer these builds: run make_dist.py, then upload dist/.")
+        return 1
+    print("The manifest offers these builds.")
+    return 0
+
+
 def main(argv=None):
     args = parse_args(argv)
+    if args.check:
+        try:
+            return check(args)
+        except (DistError, mi.ImageError, OSError, ValueError) as error:
+            print("make_dist: %s" % error, file=sys.stderr)
+            return 1
     try:
         made = build(args)
     except (DistError, mi.ImageError, OSError) as error:

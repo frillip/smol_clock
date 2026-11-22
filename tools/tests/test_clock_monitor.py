@@ -105,11 +105,18 @@ class FakeClock(threading.Thread):
                     connection.sendall(crlf(OSC))
                 elif line == "esp":
                     connection.sendall(crlf(ESP) + b"> ")
+                elif line == "esp tcomp":
+                    connection.sendall(crlf(TCOMP) + b"> ")
                 elif line == "quit":
                     connection.close()
                     return
                 else:
                     connection.sendall(b"unknown\r\n> ")
+
+
+TCOMP = """esp tcomp: ON, -187 ppb/C (learnt); ACTIVE, board 32.50 C, reference 30.00 C, crystal -467 ppb, correction +1203 us
+esp tcomp learning: 4 estimates, learnt -186.6 ppb/C, last -192.3 +/- 7.4 ppb/C over 4.20 C (1.80 C each way), r 0.83, 3 min ago, next in 95 min, window 48 samples over 4.20 C, moved 0.12 C in 30 min
+"""
 
 
 class ParseTest(unittest.TestCase):
@@ -160,6 +167,40 @@ class ParseTest(unittest.TestCase):
         clock_monitor.parse_tracking("Clock:     2026-11-16T07:28:54Z +/-12.00 ms, NOT SYNCED\n", row)
         self.assertEqual((row["ntp_bound_ns"], row["ntp_synced"]), (12000000, 0))
 
+    def test_tcomp(self):
+        row = {}
+        clock_monitor.parse_tcomp(TCOMP, row)
+        self.assertEqual(row, {"tcomp_enabled": "1", "tcomp_ppb_per_c": "-187", "tcomp_state": "ACTIVE",
+                               "tcomp_reference_c": "30.00", "tcomp_crystal_ppb": "-467",
+                               "tcomp_correction_us": "+1203", "tcomp_source": "learnt",
+                               "tcomp_estimates": "4", "tcomp_learnt_ppb_per_c": "-186.6",
+                               "tcomp_last_ppb_per_c": "-192.3", "tcomp_last_se_ppb": "7.4",
+                               "tcomp_last_range_c": "4.20", "tcomp_window": "48",
+                               "tcomp_short_polls": "0", "tcomp_moved_c": "0.12",
+                               "tcomp_short_reason": "", "tcomp_last_turn_c": "1.80",
+                               "tcomp_last_rho": "0.83"})
+        row = {}
+        clock_monitor.parse_tcomp("esp tcomp: ON, -190 ppb/C (default); ACTIVE, board 30.10 C, reference 30.00 C, "
+                                  "crystal -19 ppb, correction +2 us\n"
+                                  "esp tcomp learning: 0 estimates, window 7 samples over 0.40 C, moved 0.62 C in 30 min, "
+                                  "short polls (temperature moving, 256 s)\n", row)
+        self.assertEqual((row["tcomp_source"], row["tcomp_estimates"], row["tcomp_window"],
+                          row["tcomp_short_polls"], row["tcomp_short_reason"], row["tcomp_moved_c"],
+                          "tcomp_last_ppb_per_c" in row),
+                         ("default", "0", "7", "1", "temperature moving", "0.62", False))
+        # Before learning: no source, no second line.
+        row = {}
+        clock_monitor.parse_tcomp("esp tcomp: ON, -120 ppb/C; NO TEMPERATURE, crystal +0 ppb, "
+                                  "correction +0 us\n", row)
+        self.assertNotIn("tcomp_source", row)
+        self.assertEqual((row["tcomp_state"], row["tcomp_ppb_per_c"], row["tcomp_reference_c"]
+                          if "tcomp_reference_c" in row else ""), ("NO TEMPERATURE", "-120", ""))
+        row = {}
+        clock_monitor.parse_tcomp("esp tcomp: OFF, +40 ppb/C; OFF, board 30.10 C, reference 29.00 C, "
+                                  "crystal +0 ppb, correction -12 us\n", row)
+        self.assertEqual((row["tcomp_enabled"], row["tcomp_state"], row["tcomp_correction_us"]),
+                         ("0", "OFF", "-12"))
+
     def test_env_board_only(self):
         row = {}
         clock_monitor.parse_status("Env:      board -1.25 C\n", row)
@@ -203,6 +244,7 @@ class SampleTest(unittest.TestCase):
         self.assertEqual(row["osc_measured_ppm"], "-1.863")
         self.assertEqual(row["ntp_gnss_latest_ns"], 142000)
         self.assertEqual(row["loop_longest_by"], "telnet")
+        self.assertEqual(row["tcomp_crystal_ppb"], "-467")
         self.assertIn("Oscillator:", raw)
         with tempfile.TemporaryDirectory() as folder:
             path = os.path.join(folder, "out.csv")

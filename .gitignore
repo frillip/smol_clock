@@ -1,3 +1,6 @@
 __pycache__/
 /dist/
 /tools/release.local.json
+# Private keys for the upload (tools/upload_dist.py): never in git.
+/tools/keys/
+*.ppk
