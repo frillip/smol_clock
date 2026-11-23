@@ -1,6 +1,7 @@
 #include "fault.h"
 
 #include <stdio.h>
+#include "format.h" // our printf (format.h: the library's is slow)
 #include <stdlib.h>
 #include <string.h>
 

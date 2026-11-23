@@ -1,6 +1,7 @@
 #include "veml6040.h"
 
 #include <stdio.h>
+#include "../platform/format.h" // our printf (format.h: the library's is slow)
 
 #define DATA_BYTES      2U
 #define SENSITIVITY_DIV 10000UL // 1/100000 lux to 0.1 lux

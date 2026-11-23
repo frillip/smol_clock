@@ -9,7 +9,10 @@
 #include "pic_report.h"
 #include "sml_stream.h"
 
-#define RX_BUFFER_BYTES    4096
+// 16 KB: the PIC's own printf (0.3.77) sends pic -v's 5 KB at line rate,
+// 55 ms, and a loop() held that long (the console copy of the same text)
+// lost the end of it from a 4 KB buffer (2026-11-23).
+#define RX_BUFFER_BYTES    16384
 #define TX_BUFFER_BYTES    1024
 #define FRAME_TIMEOUT_MS   100U
 #define SML_TIMEOUT_MS     5000U
@@ -621,8 +624,24 @@ static void on_frame(const SmlFrame *frame, void *context)
     handle_frame(frame);
 }
 
+// The UART driver's receive errors (its event task): counted, shown on the
+// link's UART line in pic -v.
+static void on_receive_error(hardwareSerial_error_t error)
+{
+    if (error == UART_BUFFER_FULL_ERROR || error == UART_FIFO_OVF_ERROR)
+    {
+        stats.rx_overflows++;
+    }
+    else if (error != UART_NO_ERROR)
+    {
+        stats.rx_line_errors++;
+    }
+}
+
+
 void pic_link_init(void)
 {
+    uart.onReceiveError(on_receive_error);
     uart.setRxBufferSize(RX_BUFFER_BYTES);
     uart.setTxBufferSize(TX_BUFFER_BYTES);
     uart.begin(BOARD_PIC_BAUD, SERIAL_8N1, BOARD_PIC_RX_PIN, BOARD_PIC_TX_PIN);

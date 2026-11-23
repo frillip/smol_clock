@@ -5,6 +5,7 @@
 #include "../platform/time_ms.h"
 #include <stddef.h>
 #include <stdio.h>
+#include "../platform/format.h" // our printf (format.h: the library's is slow)
 #include <string.h>
 
 // Static storage: the parser buffer alone is over 500 bytes, far too much

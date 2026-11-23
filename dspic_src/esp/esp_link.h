@@ -30,7 +30,9 @@
  *                   expected_revision is current (else STALE_REVISION);
  *                   PERSIST asks for them to be stored
  *
- * Commands handled: SHOW (an SML_SHOW_* topic, printed), REQUEST_MESSAGE
+ * Commands handled: SHOW (an SML_SHOW_* topic, printed a piece per main-loop
+ * pass through console/print_queue.h and answered after it; BUSY if the
+ * queue is full), REQUEST_MESSAGE
  * (TIME-AUTH/PIC/CTRL/MEAS/GNSS, STAT-UI, STAT-ENV, STAT-SOURCES,
  * STAT-SETTINGS, STAT-SYS), SAVE (ACCEPTED, then ACK or NACK
  * STORAGE/VERIFY once stored; BUSY while one is under way), DEFAULTS (the

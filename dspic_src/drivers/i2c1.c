@@ -15,6 +15,7 @@
 #include "i2c1.h"
 
 #include <stdio.h>
+#include "../platform/format.h" // our printf (format.h: the library's is slow)
 #include <xc.h>
 
 #include "../platform/board.h"

@@ -1,6 +1,7 @@
 #include "debug.h"
 
 #include <stdio.h>
+#include "../platform/format.h" // our printf (format.h: the library's is slow)
 
 #include "text.h"
 

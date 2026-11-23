@@ -63,9 +63,24 @@ class Stream
 };
 
 #define SERIAL_8N1 0
+typedef enum
+{
+    UART_NO_ERROR,
+    UART_BREAK_ERROR,
+    UART_BUFFER_FULL_ERROR,
+    UART_FIFO_OVF_ERROR,
+    UART_FRAME_ERROR,
+    UART_PARITY_ERROR
+} hardwareSerial_error_t;
+
 class HardwareSerial : public Stream
 {
   public:
+    void (*on_error)(hardwareSerial_error_t) = nullptr;
+    void onReceiveError(void (*function)(hardwareSerial_error_t))
+    {
+        on_error = function;
+    }
     std::vector<uint8_t> tx;
     std::deque<uint8_t> rx;
     HardwareSerial(int)

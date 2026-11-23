@@ -8,6 +8,7 @@
         <itemPath>console/console.h</itemPath>
         <itemPath>console/text.h</itemPath>
         <itemPath>console/debug.h</itemPath>
+        <itemPath>console/print_queue.h</itemPath>
       </logicalFolder>
       <logicalFolder name="drivers" displayName="drivers" projectFiles="true">
         <itemPath>drivers/uart1.h</itemPath>
@@ -48,6 +49,7 @@
         <itemPath>platform/utc.h</itemPath>
         <itemPath>platform/boot.h</itemPath>
         <itemPath>platform/fault.h</itemPath>
+        <itemPath>platform/format.h</itemPath>
         <itemPath>../common/boot_layout.h</itemPath>
         <itemPath>../common/boot_crc.h</itemPath>
         <itemPath>../common/enums.h</itemPath>
@@ -108,6 +110,7 @@
         <itemPath>console/console.c</itemPath>
         <itemPath>console/text.c</itemPath>
         <itemPath>console/debug.c</itemPath>
+        <itemPath>console/print_queue.c</itemPath>
       </logicalFolder>
       <logicalFolder name="drivers" displayName="drivers" projectFiles="true">
         <itemPath>drivers/uart1.c</itemPath>
@@ -145,6 +148,7 @@
         <itemPath>platform/utc.c</itemPath>
         <itemPath>platform/boot.c</itemPath>
         <itemPath>platform/fault.c</itemPath>
+        <itemPath>platform/format.c</itemPath>
         <itemPath>platform/app_vectors.s</itemPath>
         <itemPath>platform/traps.s</itemPath>
       </logicalFolder>

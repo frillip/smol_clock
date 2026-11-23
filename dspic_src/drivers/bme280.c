@@ -1,6 +1,7 @@
 #include "bme280.h"
 
 #include <stdio.h>
+#include "../platform/format.h" // our printf (format.h: the library's is slow)
 
 static Bme280Status status;
 static Bme280Calibration calibration;
@@ -41,7 +42,6 @@ static uint8_t data_address = BME280_REG_DATA;
 static uint8_t data[BME280_DATA_BYTES];
 static I2cTransfer read_transfer =
     I2C_TRANSFER(BME280_ADDRESS, &data_address, 1U, data, BME280_DATA_BYTES);
-
 
 // --------------------------------------------------------------------------
 // Compensation (data sheet section 4.2.3 and 8.2, 32-bit)

@@ -16,7 +16,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
+#include "../../console/print_queue.h"
 #include "../../sync/source_gnss.h"
 #include "../../sync/source_ntp.h"
 #include "../../sync/sync.h"
@@ -34,6 +36,64 @@ static int failures, checks;
             printf("  FAIL line %d: %s\n", __LINE__, #cond); \
         }                                                    \
     } while (0)
+
+// What the synchroniser's report prints, in one go or queued a part per step
+// (console/print_queue.h): the same text.
+#define SNAPSHOT_EPOCH 300 // locked on GNSS, with history
+
+static char captured[3][16384];
+static int saved_stdout;
+
+// stdout into file, until restore_stdout().
+static void into(FILE *file)
+{
+    fflush(stdout);
+    saved_stdout = dup(1);
+    dup2(fileno(file), 1);
+}
+
+
+static void restore_stdout(void)
+{
+    fflush(stdout);
+    dup2(saved_stdout, 1);
+    close(saved_stdout);
+}
+
+
+static size_t read_back(FILE *file, int which)
+{
+    size_t length;
+
+    rewind(file);
+    length = fread(captured[which], 1, sizeof(captured[which]) - 1U, file);
+    captured[which][length] = '\0';
+    fclose(file);
+    return length;
+}
+
+
+static size_t capture(int which, bool queued, bool verbose)
+{
+    FILE *file = tmpfile();
+
+    into(file);
+    if (queued)
+    {
+        print_queue_reset();
+        (void)sync_report_queue(verbose);
+        while (print_queue_service(0, true))
+        {
+        }
+    }
+    else
+    {
+        sync_report_status(verbose);
+    }
+    restore_stdout();
+    return read_back(file, which);
+}
+
 
 // ---- Epoch timer stand-in ----------------------------------------------
 static uint32_t requested_period;
@@ -225,6 +285,7 @@ int main(void)
     SyncState seen[32];
     int transitions = 0;
     const SyncStatus *status;
+    FILE *parts_file = NULL;
 
     leap_event = MIDNIGHT;
     memset(&r, 0, sizeof r);
@@ -288,6 +349,30 @@ int main(void)
         }
         update = sync_update(&snap, (uint32_t)k * 1000U);
         status = sync_status();
+
+        // Printed in parts with epochs between them, the report is still
+        // the synchroniser as it stood at its first part.
+        if (k == SNAPSHOT_EPOCH)
+        {
+            (void)capture(0, false, true);
+            parts_file = tmpfile();
+            print_queue_reset();
+            (void)sync_report_queue(true);
+            into(parts_file);
+            (void)print_queue_service(0, true); // part 0: the copy
+            restore_stdout();
+        }
+        if (k == SNAPSHOT_EPOCH + 30)
+        {
+            (void)capture(2, false, true);
+            into(parts_file);
+            while (print_queue_service(0, true))
+            {
+            }
+            restore_stdout();
+            (void)read_back(parts_file, 1);
+            CHECK(strcmp(captured[0], captured[1]) == 0 && strcmp(captured[0], captured[2]) != 0);
+        }
         if (update.transitioned && transitions < 32)
         {
             const SyncTransition *t = sync_last_transition();
@@ -348,6 +433,15 @@ int main(void)
     }
 
     sync_report_status(true);
+    for (int verbose = 0; verbose < 2; verbose++)
+    {
+        size_t whole = capture(0, false, verbose != 0);
+        size_t parts = capture(1, true, verbose != 0);
+
+        CHECK(whole > 40 && whole == parts && strcmp(captured[0], captured[1]) == 0);
+        CHECK(print_queue_stats()->most == 1 &&
+              print_queue_stats()->steps == (verbose ? SYNC_REPORT_PARTS : 1U));
+    }
     status = sync_status();
     printf("sync state machine\n");
     printf("  first locked at epoch %ld; worst error locked %.1f, while the receiver was unlocked "

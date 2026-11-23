@@ -14,10 +14,15 @@
  * flash, in settings/ (settings/settings.h, drivers/flash.h).
  */
 #include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
 #include <stdio.h>
+#include "platform/format.h" // our printf (format.h: the library's is slow)
 
 #include "console/console.h"
+#include "platform/time_ms.h"
 #include "console/debug.h"
+#include "console/print_queue.h"
 #include "../common/boot_layout.h"
 #include "drivers/boot_image.h"
 #include "drivers/buzzer.h"
@@ -26,6 +31,7 @@
 #include "drivers/pcf8563.h"
 #include "drivers/veml6040.h"
 #include "drivers/bme280.h"
+#include "drivers/uart1.h"
 #include "esp/esp_link.h"
 #include "esp/esp_report.h"
 #include "esp/spl_writer.h"
@@ -78,6 +84,8 @@ static SchedulerTask minute_report = SCHEDULER_AT_SLOT("minute report", REPORT_S
 static SchedulerTask settings_store = SCHEDULER_AT_SLOT("settings store", SETTINGS_STORE_SLOT);
 // The epoch's work, started by timing_snapshot(): timed only.
 static SchedulerTask epoch_work = SCHEDULER_SECTION("epoch");
+// A piece of a long printout (console/print_queue.h).
+static SchedulerTask print_work = SCHEDULER_SECTION("print");
 
 // The GNSS receiver link, with the latest PPS edge for labelling: as
 // watched, so labelling carries on whatever the capture is routed to.
@@ -153,7 +161,6 @@ static void spl_app(SplWriterApp *app)
 static SplWriterPort spl_port = {flash_read_instruction, spl_erase,  spl_write,
                                  NULL,                   esp_link_send_boot, spl_app,
                                  boot_new_spl};
-
 
 // The alarm dot follows the alarm, and its changes are printed with
 // DEBUG_EVENTS.
@@ -335,6 +342,96 @@ static void run_epoch(const TimingSnapshot *snapshot)
 
 
 // One of the full reports, by the epoch's place in the minute.
+/*
+ * The slowest print step since the last report: its time, what it wrote
+ * and in how many write() calls (one per character would say the C library
+ * hands output over a byte at a time), and which step (its address, from
+ * the map file, and its argument: a section or part number).
+ */
+typedef struct
+{
+    uint32_t ms;
+    uint32_t bytes;
+    uint32_t calls;
+    PrintStep step;
+    uint16_t arg;
+} SlowStep;
+
+static SlowStep slowest;
+
+static void run_print_step(void)
+{
+    uint32_t started = epoch_timer_ms();
+    uint32_t bytes, calls, bytes_after, calls_after, ms;
+
+    console_counts(&bytes, &calls);
+    if (!print_queue_service(scheduler_now_ms(), uart1_tx_free() >= PRINT_QUEUE_ROOM))
+    {
+        return;
+    }
+    console_push(); // the step's last partial line counted with it
+    ms = time_ms_elapsed(epoch_timer_ms(), started);
+    if (ms >= slowest.ms)
+    {
+        console_counts(&bytes_after, &calls_after);
+        slowest.ms = ms;
+        slowest.bytes = bytes_after - bytes;
+        slowest.calls = calls_after - calls;
+        slowest.step = print_queue_stats()->last;
+        slowest.arg = print_queue_stats()->last_arg;
+    }
+}
+
+
+static void scheduler_step(uint32_t now_ms, uint16_t arg, bool verbose)
+{
+    (void)now_ms;
+    (void)arg;
+    (void)verbose;
+    scheduler_print();
+    printf("  slowest print step: %lu ms, %lu bytes in %lu writes (step 0x%04X, %u)\r\n",
+           (unsigned long)slowest.ms, (unsigned long)slowest.bytes, (unsigned long)slowest.calls,
+           (unsigned)(uintptr_t)slowest.step, (unsigned)slowest.arg);
+    memset(&slowest, 0, sizeof(slowest));
+}
+
+
+static void gnss_step(uint32_t now_ms, uint16_t arg, bool verbose)
+{
+    (void)arg;
+    gnss_print(now_ms, verbose);
+}
+
+
+// The minute's full report, a module per step, each queueing the next.
+static void full_report_step(uint32_t now_ms, uint16_t item, bool verbose)
+{
+    switch (item)
+    {
+        case 0: (void)sync_report_queue(verbose); break;
+        case 1: display_print(); break;
+        case 2: timezone_print(sync_status()->time.utc_seconds, verbose); break;
+        case 3:
+            pcf8563_print(now_ms, rtc_reference(), verbose);
+            source_rtc_print(verbose);
+            break;
+        case 4:
+            veml6040_print(now_ms, verbose);
+            bme280_print(now_ms, verbose);
+            break;
+        case 5:
+            brightness_print(verbose);
+            controls_print(verbose);
+            alarm_print(verbose);
+            break;
+        case 6: i2c1_print(); break;
+        case 7: esp_link_print(); return; // the last
+        default: return;
+    }
+    (void)print_queue_add(full_report_step, (uint16_t)(item + 1U), verbose);
+}
+
+
 static void report_minute(void)
 {
     uint32_t minute_epoch = scheduler_epoch() % FULL_REPORT_EPOCHS;
@@ -349,27 +446,16 @@ static void report_minute(void)
     }
     if (minute_epoch == SCHEDULER_REPORT_EPOCH)
     {
-        scheduler_print();
+        (void)print_queue_add(scheduler_step, 0, true);
     }
     if (minute_epoch == GNSS_REPORT_EPOCH)
     {
-        gnss_print(epoch_timer_ms(), true);
+        (void)print_queue_add(gnss_step, 0, true);
     }
     if (minute_epoch == SYNC_REPORT_EPOCH)
     {
-        // In full: these are diagnostics.
-        sync_report_status(true);
-        display_print();
-        timezone_print(sync_status()->time.utc_seconds, true);
-        pcf8563_print(epoch_timer_ms(), rtc_reference(), true);
-        source_rtc_print(true);
-        veml6040_print(epoch_timer_ms(), true);
-        bme280_print(epoch_timer_ms(), true);
-        brightness_print(true);
-        controls_print(true);
-        alarm_print(true);
-        i2c1_print();
-        esp_link_print();
+        // In full (these are diagnostics), a piece per pass.
+        (void)print_queue_add(full_report_step, 0, true);
     }
 }
 
@@ -506,5 +592,15 @@ int main(void)
             // Not while the SPL writer is erasing, committing or confirming.
             settings_service(scheduler_epoch(), flash_quiet() && !spl_writer_owns_flash());
         }
+
+        // A piece of a long printout (SHOW, the minute's full report), last
+        // in the pass, while the TX ring has room for it.
+        if (print_queue_busy())
+        {
+            scheduler_section(&print_work);
+            run_print_step();
+        }
+        // Text printed this pass without a line end (console.h).
+        console_push();
     }
 }

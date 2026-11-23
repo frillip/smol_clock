@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "../../console/print_queue.h"
 #include "../../drivers/pcf8563.h"
 #include "../../drivers/tubes.h"
 #include "../../drivers/uart1.h"
@@ -113,6 +114,11 @@ void console_set_sink(ConsoleSink new_sink)
 
 
 void console_flush(void)
+{
+}
+
+
+void console_push(void)
 {
 }
 
@@ -239,28 +245,33 @@ const char *display_mode_name(DisplayMode mode)
 }
 
 
+// SHOW, queued: ALL counted, other topics noted, printed when the queue
+// runs the step (console/print_queue.h, real).
 static int prints;
-void esp_report_print_all(uint32_t now_ms, bool verbose)
-{
-    (void)now_ms;
-    (void)verbose;
-    prints++;
-}
-
-
-// SHOW topics other than ALL.
 static uint32_t shown_topic = 0xFFFFFFFFUL;
 static bool shown_verbose;
-bool esp_report_show(uint32_t topic, bool verbose, uint32_t now_ms)
+static void show_step(uint32_t now_ms, uint16_t topic, bool verbose)
 {
     (void)now_ms;
     shown_verbose = verbose;
-    if (topic == SML_SHOW_ALL || topic >= SML_SHOW_COUNT)
+    if (topic == SML_SHOW_ALL)
+    {
+        prints++;
+    }
+    else
+    {
+        shown_topic = topic;
+    }
+}
+
+
+bool esp_report_queue(uint32_t topic, bool verbose)
+{
+    if (topic >= SML_SHOW_COUNT)
     {
         return false;
     }
-    shown_topic = topic;
-    return true;
+    return print_queue_add(show_step, (uint16_t)topic, verbose);
 }
 
 
@@ -455,6 +466,10 @@ static void service(void)
 {
     now += 10;
     esp_link_service(now);
+    // The main loop's printing, a step a pass.
+    while (print_queue_service(now, true))
+    {
+    }
     collect();
 }
 

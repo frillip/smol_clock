@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stdio.h>
+#include "../platform/format.h" // our printf (format.h: the library's is slow)
 
 #include "../console/text.h"
 #include "timing_config.h"

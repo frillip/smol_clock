@@ -62,6 +62,8 @@ typedef struct
     uint32_t restarts;    // PIC restarts seen (STAT-SYS uptime dropped)
     uint32_t held_back;   // frames not sent while the PIC was in its SPL
     uint32_t spl_entries; // times the PIC was seen entering its SPL
+    uint32_t rx_overflows;   // UART receive buffer or FIFO full: bytes lost
+    uint32_t rx_line_errors; // framing, parity, break
 } PicLinkStats;
 
 typedef struct

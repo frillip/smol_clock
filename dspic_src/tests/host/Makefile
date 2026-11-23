@@ -13,9 +13,10 @@ S := ../../sync
 GNSS_SOURCES := $(C)/text.c host_console.c ../../platform/utc.c $(G)/ubx_parser.c $(G)/ubx_decode.c $(G)/ubx_encode.c $(G)/gnss_epoch.c \
                 $(G)/gnss_detect.c $(G)/gnss.c
 
-all: test_text test_utc test_numeric sim_new test_epoch_scheduler test_acquire test_sync test_sources test_monitor test_console test_gnss test_uart2 \
+all: test_format test_text test_utc test_numeric sim_new test_epoch_scheduler test_acquire test_sync test_sources test_monitor test_console test_gnss test_uart2 \
      test_display test_scheduler test_sml test_timezone test_esp_link test_esp_report test_i2c test_rtc \
      test_store test_settings test_epoch_resume test_brightness test_veml6040 test_bme280 test_controls test_buzzer test_beeps test_alarm test_menu test_set_time test_boot_layout test_boot test_fault test_spl_writer
+	./test_format
 	./test_text
 	./test_utc
 	./test_numeric
@@ -79,6 +80,9 @@ test_text: test_text.c $(C)/text.c
 	$(CC) $(CFLAGS) -o $@ $^
 
 # Calendar and leap seconds, every day 1970-2106.
+test_format: test_format.c ../../platform/format.c
+	$(CC) $(CFLAGS) -Wno-format-security -DFORMAT_TEST_HARDWARE_DIVIDE -o $@ $^
+
 test_utc: test_utc.c ../../platform/utc.c
 	$(CC) $(CFLAGS) -o $@ $^
 
@@ -102,7 +106,7 @@ test_acquire: test_acquire.c $(T)/epoch_control.c $(T)/kalman.c $(T)/servo.c
 
 # Source selection, state machine and time of day, closed through the same
 # model, with a scripted GNSS source.
-test_sync: test_sync.c $(S)/sync.c $(S)/sync_source.c $(S)/sync_report.c ../../platform/utc.c \
+test_sync: test_sync.c $(S)/sync.c $(S)/sync_source.c $(S)/sync_report.c ../../platform/utc.c $(C)/print_queue.c \
            $(C)/text.c host_console.c \
            $(T)/epoch_control.c $(T)/kalman.c $(T)/servo.c
 	$(CC) -std=gnu99 -O1 -Wall -Wextra -DSYNC_SYNCHRONISED_LIMIT_NS=4000UL -o $@ $^ -lm
@@ -112,6 +116,7 @@ test_sync: test_sync.c $(S)/sync.c $(S)/sync_source.c $(S)/sync_report.c ../../p
 # Selection between GNSS, NTP and holdover, closed through a model of both
 # PPS inputs, with the real edge pairing.
 test_sources: test_sources.c $(S)/sync.c $(S)/sync_source.c $(S)/sync_report.c $(S)/source_edge.c \
+              $(C)/print_queue.c \
               ../../platform/utc.c $(C)/text.c host_console.c \
               $(T)/epoch_control.c $(T)/kalman.c $(T)/servo.c
 	$(CC) -std=gnu99 -O1 -Wall -Wextra -o $@ $^ -lm
@@ -121,9 +126,9 @@ test_monitor: test_monitor.c pps_monitor_host.c fake_monitor/xc.h
 	$(CC) -std=gnu99 -O1 -Wall -Wextra -I fake_monitor -I $(T) -o $@ test_monitor.c pps_monitor_host.c
 
 # UART1 driver and the printf write() hook, against a model of the UART.
-test_console: test_console.c uart1_host.c $(C)/console.c fake_uart/xc.h
+test_console: test_console.c uart1_host.c $(C)/console.c ../../platform/format.c fake_uart/xc.h
 	$(CC) -std=gnu99 -O1 -Wall -Wextra -DCONSOLE_BAUD_RATE=115200UL -I fake_uart -I $(D) -o $@ \
-	      test_console.c uart1_host.c $(C)/console.c
+	      test_console.c uart1_host.c $(C)/console.c ../../platform/format.c
 
 # GNSS stack against a simulated u-blox receiver over a stand-in UART2.
 test_gnss: test_gnss.c host_uart2.c sim_receiver.c memmove_count.c fake_gnss_sfr.c $(GNSS_SOURCES) \
@@ -178,7 +183,7 @@ SETTINGS_SOURCES := ../../settings/settings.c ../../settings/store.c fake_flash/
                     fake_control.c fake_source_rtc.c $(T)/kalman.c
 test_esp_link: test_esp_link.c ../../esp/esp_link.c ../../../common/sml.c $(U)/timezone.c \
                ../../platform/utc.c ../../platform/boot.c $(C)/debug.c $(C)/text.c $(SETTINGS_SOURCES) \
-               ../../esp/spl_writer.c ../../../common/boot_crc.c
+               ../../esp/spl_writer.c ../../../common/boot_crc.c $(C)/print_queue.c
 	$(CC) -std=gnu99 -O1 -Wall -Wextra -I fake_esp -o $@ $^
 
 # The settings store against a model of the flash: power cut at every point.
@@ -207,7 +212,7 @@ test_alarm: test_alarm.c $(U)/alarm.c
 	$(CC) $(CFLAGS) -o $@ $^
 
 # The time set by hand (the menu's tIME), against the real sync and epoch control.
-test_set_time: test_set_time.c $(S)/sync.c $(S)/sync_source.c $(S)/sync_report.c ../../platform/utc.c \
+test_set_time: test_set_time.c $(S)/sync.c $(S)/sync_source.c $(S)/sync_report.c ../../platform/utc.c $(C)/print_queue.c \
                $(C)/text.c host_console.c $(T)/epoch_control.c $(T)/kalman.c $(T)/servo.c
 	$(CC) -std=gnu99 -O1 -Wall -Wextra -o $@ $^ -lm
 
@@ -233,13 +238,15 @@ test_epoch_resume: test_epoch_resume.c epoch_timer_host.c $(T)/epoch_output.c fa
 
 # The SML payloads built from the clock's state, against stand-in states.
 test_esp_report: test_esp_report.c ../../esp/esp_report.c $(U)/timezone.c ../../../common/sml.c \
-                 ../../platform/utc.c ../../platform/boot.c ../../platform/fault.c ../../esp/spl_writer.c fake_report/xc.h
+                 ../../platform/utc.c ../../platform/boot.c ../../platform/fault.c ../../esp/spl_writer.c fake_report/xc.h \
+                 $(C)/print_queue.c
 	$(CC) -std=gnu99 -O1 -Wall -Wextra -I fake_report -o $@ test_esp_report.c \
 	      ../../esp/esp_report.c $(U)/timezone.c ../../../common/sml.c ../../platform/utc.c \
-	      ../../platform/boot.c ../../platform/fault.c ../../esp/spl_writer.c ../../../common/boot_crc.c
+	      ../../platform/boot.c ../../platform/fault.c ../../esp/spl_writer.c ../../../common/boot_crc.c \
+	      $(C)/print_queue.c
 
 clean:
-	rm -f test_spl_writer test_fault test_rtc test_i2c i2c1_host.c test_text test_sync_link test_sources test_monitor pps_monitor_host.c test_utc test_numeric sim_new sim_old test_epoch_scheduler test_acquire test_sync test_console test_gnss test_uart2 test_display test_scheduler test_sml test_boot_layout test_boot test_timezone test_esp_link test_esp_report \
+	rm -f test_format test_spl_writer test_fault test_rtc test_i2c i2c1_host.c test_text test_sync_link test_sources test_monitor pps_monitor_host.c test_utc test_numeric sim_new sim_old test_epoch_scheduler test_acquire test_sync test_console test_gnss test_uart2 test_display test_scheduler test_sml test_boot_layout test_boot test_timezone test_esp_link test_esp_report \
 	      test_store test_settings test_epoch_resume test_brightness test_veml6040 test_bme280 test_controls test_buzzer test_beeps test_alarm test_menu test_set_time buzzer_host.c epoch_timer_host.c uart1_host.c uart2_host.c
 
 .PHONY: all clean

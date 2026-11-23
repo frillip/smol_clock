@@ -17,6 +17,7 @@
 #include "../../ui/controls.h"
 #include "../../../common/boot_layout.h"
 #include "../../drivers/boot_image.h"
+#include "../../console/print_queue.h"
 #include "../../esp/esp_report.h"
 #include "../../platform/boot.h"
 #include "../../platform/fault.h"
@@ -367,9 +368,11 @@ uint32_t display_delta_epoch(void)
 }
 
 
-void sync_report_status(bool verbose)
+bool sync_report_queue(bool verbose)
 {
     (void)verbose;
+    note("sync");
+    return true;
 }
 
 
@@ -440,6 +443,7 @@ const I2c1Stats *i2c1_stats(void)
 
 void i2c1_print(void)
 {
+    note("i2c");
 }
 
 
@@ -1041,11 +1045,41 @@ int main(void)
         printed[0] = '\0';
         CHECK(!esp_report_show(SML_SHOW_ALL, false, 1000) &&
               !esp_report_show(SML_SHOW_COUNT, false, 1000) && printed[0] == '\0');
-        esp_report_print_all(1000, false);
-        CHECK(strstr(printed, "settings") != NULL && strstr(printed, "rtc-source") != NULL &&
-              strstr(printed, "oscillator") != NULL && strstr(printed, "display") == NULL);
-        // The sensors after the oscillator, before the receiver.
-        CHECK(strstr(printed, "oscillator light env gnss") != NULL);
+        // ALL: queued (console/print_queue.h), a section per step, each
+        // queueing the next, so it holds one place in the queue.
+        {
+            int steps = 0;
+
+            print_queue_reset();
+            printed[0] = '\0';
+            CHECK(esp_report_queue(SML_SHOW_ALL, false) && printed[0] == '\0');
+            while (print_queue_service(1000, true))
+            {
+                steps++;
+            }
+            CHECK(strstr(printed, "settings") != NULL && strstr(printed, "rtc-source") != NULL &&
+                  strstr(printed, "oscillator") != NULL && strstr(printed, "display") == NULL &&
+                  strstr(printed, "i2c") == NULL);
+            // In order: the synchroniser first, the sensors after the
+            // oscillator, before the receiver.
+            CHECK(strncmp(printed, "sync settings ", 14) == 0 &&
+                  strstr(printed, "oscillator light env gnss") != NULL);
+            CHECK(steps == 10 && print_queue_stats()->most == 1);
+            printed[0] = '\0';
+            CHECK(esp_report_queue(SML_SHOW_ALL, true));
+            while (print_queue_service(1000, true))
+            {
+            }
+            CHECK(strstr(printed, "display brightness") != NULL &&
+                  strstr(printed, "gnss i2c ") != NULL);
+            // One topic, one step; no room, nothing runs.
+            printed[0] = '\0';
+            CHECK(esp_report_queue(SML_SHOW_GNSS, false) &&
+                  !esp_report_queue(SML_SHOW_COUNT, false));
+            CHECK(!print_queue_service(1000, false) && printed[0] == '\0');
+            CHECK(print_queue_service(1000, true) && strcmp(printed, "gnss ") == 0 &&
+                  !print_queue_busy());
+        }
     }
 
     test_boot_report();

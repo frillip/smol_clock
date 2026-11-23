@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include "format.h" // our printf (format.h: the library's is slow)
 
 // 1970-01-01 is day 719468 of the era-based count from 0000-03-01.
 #define DAYS_TO_1970            ((uint32_t)719468)
@@ -189,21 +190,37 @@ void utc_print_offset(int32_t offset_s)
 }
 
 
+/*
+ * value / divisor, rounded down, or half up. In 32 bits while the value
+ * fits: the library's 64-bit divide costs about 0.5 ms on the dsPIC
+ * (platform/format.h), and every bound and phase up to 4.29 s fits.
+ */
+static uint64_t divide(uint64_t value, uint32_t divisor, bool round)
+{
+    uint32_t half = round ? divisor / 2U : 0U;
+
+    if (value <= 0xFFFFFFFFULL - half)
+    {
+        return ((uint32_t)value + half) / divisor;
+    }
+    return (value + half) / divisor;
+}
+
+
 void utc_format_ns(char *text, int64_t ns, bool plus)
 {
     static const char *const units[] = {"ns", "us", "ms", "s"};
-    uint64_t size = (uint64_t)(ns < 0 ? -ns : ns);
+    static const uint32_t scales[] = {1UL, 1000UL, 1000000UL, 1000000000UL};
+    static const uint16_t powers[] = {1U, 10U, 100U, 1000U};
+    uint64_t size = ns < 0 ? (uint64_t)(-(ns + 1)) + 1U : (uint64_t)ns;
     const char *sign = ns < 0 ? "-" : (plus ? "+" : "");
     uint8_t unit = 0;
-    uint64_t scale = 1;
     uint8_t decimals;
-    uint64_t power;
     uint64_t rounded;
     uint64_t whole;
 
-    while (unit < 3U && size >= scale * 1000U)
+    while (unit < 3U && size >= (uint64_t)scales[unit] * 1000U)
     {
-        scale *= 1000U;
         unit++;
     }
     if (unit == 0U)
@@ -213,19 +230,18 @@ void utc_format_ns(char *text, int64_t ns, bool plus)
     }
     // Four figures: as many decimals as the whole part leaves; rounding may
     // carry into another digit (9.9996 ms is 10.00 ms) or the next unit
-    // (999.96 us is 1.000 ms).
-    whole = size / scale;
+    // (999.96 us is 1.000 ms). Rounded to 10^-decimals of the unit: size
+    // over scale / 10^decimals, itself a power of ten (or 1).
+    whole = divide(size, scales[unit], false);
     decimals = whole >= 1000U ? 0U : whole >= 100U ? 1U : whole >= 10U ? 2U : 3U;
     for (;;)
     {
         uint8_t digits;
 
-        power = decimals == 3U ? 1000U : decimals == 2U ? 100U : decimals == 1U ? 10U : 1U;
-        rounded = (size * power + scale / 2U) / scale;
-        whole = rounded / power;
+        rounded = divide(size, scales[unit] / powers[decimals], true);
+        whole = divide(rounded, powers[decimals], false);
         if (whole >= 1000U && unit < 3U)
         {
-            scale *= 1000U;
             unit++;
             decimals = 3U;
             continue;
@@ -245,7 +261,7 @@ void utc_format_ns(char *text, int64_t ns, bool plus)
     else
     {
         sprintf(text, "%s%lu.%0*lu %s", sign, (unsigned long)whole, (int)decimals,
-                (unsigned long)(rounded % power), units[unit]);
+                (unsigned long)(rounded - whole * powers[decimals]), units[unit]);
     }
 }
 

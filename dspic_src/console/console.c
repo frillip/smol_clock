@@ -3,8 +3,12 @@
 #include "../drivers/uart1.h"
 
 #include <stddef.h>
+#include <stdio.h>
+#include "../platform/format.h" // our printf (format.h: the library's is slow)
 
 static uint32_t stalls;
+static uint32_t written_bytes;
+static uint32_t write_calls;
 static ConsoleSink sink;
 
 bool console_init(uint32_t instruction_hz)
@@ -16,14 +20,28 @@ bool console_init(uint32_t instruction_hz)
 }
 
 
+void console_push(void)
+{
+    format_flush();
+}
+
+
 uint32_t console_stalls(void)
 {
     return stalls;
 }
 
 
+void console_counts(uint32_t *bytes, uint32_t *calls)
+{
+    *bytes = written_bytes;
+    *calls = write_calls;
+}
+
+
 void console_set_sink(ConsoleSink new_sink)
 {
+    console_push(); // what was printed before goes where it was meant to
     sink = new_sink;
 }
 
@@ -38,6 +56,7 @@ void console_write(const char *text, uint16_t length)
 
 void console_flush(void)
 {
+    console_push();
     while (uart1_is_enabled() && !uart1_tx_done())
     {
         uart1_tx_poll();
@@ -58,6 +77,8 @@ int __attribute__((__section__(".libc.write"))) write(int handle, void *buffer, 
     bool stalled = false;
 
     (void)handle;
+    written_bytes += len;
+    write_calls++;
     if (!uart1_is_enabled() || buffer == NULL)
     {
         return (int)len;

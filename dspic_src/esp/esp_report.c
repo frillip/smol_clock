@@ -3,8 +3,10 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include "../platform/format.h" // our printf (format.h: the library's is slow)
 #include <string.h>
 
+#include "../console/print_queue.h"
 #include "../drivers/boot_image.h"
 #include "../drivers/i2c1.h"
 #include "../drivers/pcf8563.h"
@@ -910,24 +912,70 @@ bool esp_report_show(uint32_t topic, bool verbose, uint32_t now_ms)
 }
 
 
-void esp_report_print_all(uint32_t now_ms, bool verbose)
+// SHOW ALL, a section per step (console/print_queue.h), each queueing the
+// next: one place in the queue however long the printout.
+typedef enum
 {
-    esp_report_print_system(verbose);
-    sync_report_status(verbose);
-    timezone_print(sync_status()->time.utc_seconds, verbose);
-    settings_print(verbose);
-    (void)esp_report_show(SML_SHOW_DISPLAY, verbose, now_ms);
-    (void)esp_report_show(SML_SHOW_RTC, verbose, now_ms);
-    settings_print_oscillator(verbose);
-    // The sensors beside the oscillator: its frequency follows the temperature.
-    (void)esp_report_show(SML_SHOW_SENSORS, verbose, now_ms);
-    gnss_print(now_ms, verbose);
-    if (verbose)
+    ALL_SYSTEM = 0,
+    ALL_SYNC,
+    ALL_TZ,
+    ALL_SETTINGS,
+    ALL_DISPLAY,
+    ALL_RTC,
+    ALL_OSC,
+    ALL_SENSORS, // beside the oscillator: its frequency follows the temperature
+    ALL_GNSS,
+    ALL_I2C,
+    ALL_SECTIONS
+} AllSection;
+
+static void all_step(uint32_t now_ms, uint16_t section, bool verbose)
+{
+    switch ((AllSection)section)
     {
-        i2c1_print();
+        case ALL_SYSTEM: esp_report_print_system(verbose); break;
+        case ALL_SYNC: (void)sync_report_queue(verbose); break;
+        case ALL_TZ: timezone_print(sync_status()->time.utc_seconds, verbose); break;
+        case ALL_SETTINGS: settings_print(verbose); break;
+        case ALL_DISPLAY: (void)esp_report_show(SML_SHOW_DISPLAY, verbose, now_ms); break;
+        case ALL_RTC: (void)esp_report_show(SML_SHOW_RTC, verbose, now_ms); break;
+        case ALL_OSC: settings_print_oscillator(verbose); break;
+        case ALL_SENSORS: (void)esp_report_show(SML_SHOW_SENSORS, verbose, now_ms); break;
+        case ALL_GNSS: gnss_print(now_ms, verbose); break;
+        case ALL_I2C:
+            if (verbose)
+            {
+                i2c1_print();
+            }
+            else if (i2c1_stats()->stuck != 0U)
+            {
+                printf("I2C: BUS STUCK\n");
+            }
+            break;
+        default: return;
     }
-    else if (i2c1_stats()->stuck != 0U)
+    if (section + 1U < ALL_SECTIONS)
     {
-        printf("I2C: BUS STUCK\n");
+        (void)print_queue_add(all_step, (uint16_t)(section + 1U), verbose);
     }
+}
+
+
+static void show_step(uint32_t now_ms, uint16_t topic, bool verbose)
+{
+    (void)esp_report_show(topic, verbose, now_ms);
+}
+
+
+bool esp_report_queue(uint32_t topic, bool verbose)
+{
+    if (topic == SML_SHOW_ALL)
+    {
+        return print_queue_add(all_step, ALL_SYSTEM, verbose);
+    }
+    if (topic >= SML_SHOW_COUNT)
+    {
+        return false;
+    }
+    return print_queue_add(show_step, (uint16_t)topic, verbose);
 }

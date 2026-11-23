@@ -10,6 +10,12 @@
  * default (the simulator's UART). Nothing else is needed for the existing
  * printf calls to work.
  *
+ * printf is our own (platform/format.h: the library's converts each digit
+ * with a 64-bit software divide, 470 us a digit), and hands write() a line
+ * at a time. Text without a line end waits in its buffer until
+ * console_push() (the main loop calls it every pass), console_flush(), a
+ * sink change, or the buffer filling.
+ *
  * Output policy: write() blocks until every byte is queued. The 1 KB TX ring
  * absorbs the per-second status burst, so in normal running it never waits.
  * If it does wait, it moves bytes into the UART itself (uart1_tx_poll), so it
@@ -42,6 +48,11 @@ void console_write(const char *text, uint16_t length);
 
 // Times write() had to wait for ring space, for diagnostics.
 uint32_t console_stalls(void);
+// Hands what printf holds to write(): text not ended by a line end.
+void console_push(void);
+// Bytes written, and write() calls, since start: how the C library hands
+// its output over (a call per character, or per printf).
+void console_counts(uint32_t *bytes, uint32_t *calls);
 
 // From now on, hand all console text to sink instead of the UART. NULL goes
 // back to raw text. The sink must not printf.

@@ -1,6 +1,7 @@
 #include "brightness.h"
 
 #include <stdio.h>
+#include "../platform/format.h" // our printf (format.h: the library's is slow)
 
 #include "../drivers/tubes.h"
 #include "../drivers/veml6040.h"

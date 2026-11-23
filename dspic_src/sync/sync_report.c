@@ -1,7 +1,9 @@
 #include "sync_report.h"
 
 #include <stdio.h>
+#include "../platform/format.h" // our printf (format.h: the library's is slow)
 
+#include "../console/print_queue.h"
 #include "../console/text.h"
 #include "../platform/utc.h"
 
@@ -265,15 +267,51 @@ void sync_report_sources(void)
 }
 
 
-static void print_candidates(const SyncStatus *status)
+/*
+ * What the report prints from: the status, and what the candidates table
+ * asks of the synchroniser besides, taken at one moment. The report printed
+ * in one go reads the live status; printed in parts (sync_report_queue),
+ * every part reads a copy taken by its first part, so the parts agree
+ * whatever epochs pass between them.
+ */
+#define CANDIDATES (SYNC_CANDIDATE_HOLDOVER + 1U)
+typedef struct
 {
+    const SyncStatus *status;
+    uint32_t bound[CANDIDATES];
+    uint8_t rank[CANDIDATES];
+    bool steers[CANDIDATES];
+    bool synchronised;
+} SyncView;
+
+static SyncStatus copied; // the parts' copy, about half a KB
+static SyncView parts_view;
+
+static void take_view(SyncView *view, const SyncStatus *status)
+{
+    uint8_t candidate;
+
+    view->status = status;
+    for (candidate = 0; candidate < CANDIDATES; candidate++)
+    {
+        view->bound[candidate] = sync_candidate_bound(candidate);
+        view->rank[candidate] = sync_candidate_rank(candidate);
+        view->steers[candidate] = sync_source_steers(candidate);
+    }
+    view->synchronised = sync_is_synchronised();
+}
+
+
+static void print_candidates(const SyncView *taken)
+{
+    const SyncStatus *status = taken->status;
     uint8_t current = current_candidate(status);
     uint8_t candidate;
 
     printf("Candidates (bound, rank; * in use, + second choice):\r\n");
     for (candidate = 0; candidate <= SYNC_CANDIDATE_HOLDOVER; candidate++)
     {
-        uint32_t bound = sync_candidate_bound(candidate);
+        uint32_t bound = taken->bound[candidate];
         uint32_t scaled;
         const char *unit;
 
@@ -286,7 +324,7 @@ static void print_candidates(const SyncStatus *status)
                : candidate == status->second ? '+'
                                              : ' ',
                sync_source_name(candidate));
-        if (candidate < SYNC_SOURCE_COUNT && !sync_source_steers(candidate))
+        if (candidate < SYNC_SOURCE_COUNT && !taken->steers[candidate])
         {
             if (status->sources[candidate].bound_ns != 0U)
             {
@@ -309,7 +347,7 @@ static void print_candidates(const SyncStatus *status)
         {
             unit = bound_unit(bound, &scaled);
             printf(" +/-%lu%s rank %u", (unsigned long)scaled, unit,
-                   (unsigned)sync_candidate_rank(candidate));
+                   (unsigned)taken->rank[candidate]);
         }
         if (candidate == SYNC_CANDIDATE_HOLDOVER)
         {
@@ -370,57 +408,66 @@ static void print_source(uint8_t index, const SyncSourceTracker *tracker)
 }
 
 
-void sync_report_status(bool verbose)
+static bool print_part(const SyncView *taken, uint8_t part, bool verbose)
 {
-    const SyncStatus *status = sync_status();
+    const SyncStatus *status = taken->status;
     uint32_t first;
     uint32_t index;
-    uint8_t source;
 
-    printf("Sync: %s", sync_state_name(status->state));
-    if (status->source != SYNC_SOURCE_NONE)
+    if (part == 0U)
     {
-        printf(" on %s%s", sync_source_name(status->source), status->fallback ? " (FALLBACK)" : "");
-    }
-    printf(", ");
-    utc_print_duration(status->state_epochs);
-    printf(", %s\r\n", sync_is_synchronised() ? "SYNCHRONISED" : "NOT SYNCHRONISED");
-    printf("  Time: ");
-    print_time(&status->time);
-    if (status->time.known)
-    {
-        printf(" (%s)", sync_source_name(status->time.source));
-    }
-    if (verbose)
-    {
-        printf(", %lu corrections", (unsigned long)status->time.corrections);
-    }
-    if (status->time.leap.change != 0)
-    {
-        UtcCivil civil;
-        utc_to_civil(status->time.leap.event_utc - 1, false, &civil);
-        printf(", leap %s %04u-%02u-%02uT%s", status->time.leap.change > 0 ? "+1" : "-1",
-               civil.year, civil.month, civil.day,
-               status->time.leap.change > 0 ? "23:59:60Z" : "23:59:59Z");
-    }
-    printf("\r\n");
-    if (!verbose)
-    {
-        return;
-    }
-    if (status->aligned)
-    {
-        printf("Epoch put on the %s second at start-up: moved ",
-               sync_source_name(status->aligned_to));
-        utc_print_ns((int64_t)status->aligned_ticks * (1000 / (int64_t)TIMING_TICKS_PER_US), true);
+        printf("Sync: %s", sync_state_name(status->state));
+        if (status->source != SYNC_SOURCE_NONE)
+        {
+            printf(" on %s%s", sync_source_name(status->source),
+                   status->fallback ? " (FALLBACK)" : "");
+        }
+        printf(", ");
+        utc_print_duration(status->state_epochs);
+        printf(", %s\r\n", taken->synchronised ? "SYNCHRONISED" : "NOT SYNCHRONISED");
+        printf("  Time: ");
+        print_time(&status->time);
+        if (status->time.known)
+        {
+            printf(" (%s)", sync_source_name(status->time.source));
+        }
+        if (verbose)
+        {
+            printf(", %lu corrections", (unsigned long)status->time.corrections);
+        }
+        if (status->time.leap.change != 0)
+        {
+            UtcCivil civil;
+            utc_to_civil(status->time.leap.event_utc - 1, false, &civil);
+            printf(", leap %s %04u-%02u-%02uT%s", status->time.leap.change > 0 ? "+1" : "-1",
+                   civil.year, civil.month, civil.day,
+                   status->time.leap.change > 0 ? "23:59:60Z" : "23:59:59Z");
+        }
         printf("\r\n");
+        if (verbose && status->aligned)
+        {
+            printf("Epoch put on the %s second at start-up: moved ",
+                   sync_source_name(status->aligned_to));
+            utc_print_ns((int64_t)status->aligned_ticks * (1000 / (int64_t)TIMING_TICKS_PER_US),
+                         true);
+            printf("\r\n");
+        }
+        return verbose;
     }
-    print_candidates(status);
-    for (source = 0; source < SYNC_SOURCE_COUNT; source++)
+    if (!verbose || part >= SYNC_REPORT_PARTS)
     {
-        print_source(source, &status->sources[source]);
+        return false;
     }
-
+    if (part == 1U)
+    {
+        print_candidates(taken);
+        return true;
+    }
+    if (part < 2U + SYNC_SOURCE_COUNT)
+    {
+        print_source((uint8_t)(part - 2U), &status->sources[part - 2U]);
+        return true;
+    }
     printf("Transitions: %lu\r\n", (unsigned long)status->transitions);
     first =
         status->transitions > SYNC_HISTORY_LENGTH ? status->transitions - SYNC_HISTORY_LENGTH : 0U;
@@ -429,5 +476,46 @@ void sync_report_status(bool verbose)
         printf("  ");
         print_transition(&status->history[index % SYNC_HISTORY_LENGTH]);
         printf("\r\n");
+    }
+    return false;
+}
+
+
+bool sync_report_part(uint8_t part, bool verbose)
+{
+    if (part == 0U)
+    {
+        copied = *sync_status();
+        take_view(&parts_view, &copied);
+    }
+    return print_part(&parts_view, part, verbose);
+}
+
+
+// A part per step, each queueing the next.
+static void part_step(uint32_t now_ms, uint16_t part, bool verbose)
+{
+    (void)now_ms;
+    if (sync_report_part((uint8_t)part, verbose))
+    {
+        (void)print_queue_add(part_step, (uint16_t)(part + 1U), verbose);
+    }
+}
+
+
+bool sync_report_queue(bool verbose)
+{
+    return print_queue_add(part_step, 0, verbose);
+}
+
+
+void sync_report_status(bool verbose)
+{
+    SyncView live;
+    uint8_t part = 0;
+
+    take_view(&live, sync_status());
+    while (print_part(&live, part++, verbose))
+    {
     }
 }

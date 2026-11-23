@@ -111,11 +111,122 @@ static void leap_seconds(void)
 }
 
 
+// utc_format_ns as it was, all 64-bit: the 32-bit one must print the same.
+static void reference_format_ns(char *text, int64_t ns, bool plus)
+{
+    static const char *const units[] = {"ns", "us", "ms", "s"};
+    uint64_t size = (uint64_t)(ns < 0 ? -ns : ns);
+    const char *sign = ns < 0 ? "-" : (plus ? "+" : "");
+    uint8_t unit = 0;
+    uint64_t scale = 1;
+    uint8_t decimals;
+    uint64_t power;
+    uint64_t rounded;
+    uint64_t whole;
+
+    while (unit < 3U && size >= scale * 1000U)
+    {
+        scale *= 1000U;
+        unit++;
+    }
+    if (unit == 0U)
+    {
+        sprintf(text, "%s%lu ns", sign, (unsigned long)size);
+        return;
+    }
+    // Four figures: as many decimals as the whole part leaves; rounding may
+    // carry into another digit (9.9996 ms is 10.00 ms) or the next unit
+    // (999.96 us is 1.000 ms).
+    whole = size / scale;
+    decimals = whole >= 1000U ? 0U : whole >= 100U ? 1U : whole >= 10U ? 2U : 3U;
+    for (;;)
+    {
+        uint8_t digits;
+
+        power = decimals == 3U ? 1000U : decimals == 2U ? 100U : decimals == 1U ? 10U : 1U;
+        rounded = (size * power + scale / 2U) / scale;
+        whole = rounded / power;
+        if (whole >= 1000U && unit < 3U)
+        {
+            scale *= 1000U;
+            unit++;
+            decimals = 3U;
+            continue;
+        }
+        digits = whole >= 100U ? 3U : whole >= 10U ? 2U : 1U;
+        if (decimals > 0U && digits + decimals > 4U)
+        {
+            decimals--;
+            continue;
+        }
+        break;
+    }
+    if (decimals == 0U)
+    {
+        sprintf(text, "%s%lu %s", sign, (unsigned long)whole, units[unit]);
+    }
+    else
+    {
+        sprintf(text, "%s%lu.%0*lu %s", sign, (unsigned long)whole, (int)decimals,
+                (unsigned long)(rounded % power), units[unit]);
+    }
+}
+
+
+static void nanoseconds(void)
+{
+    static const int64_t edges[] = {0, 1, 9, 999, 1000, 1004, 1005, 9999, 9995, 99995, 99996,
+                                    999949, 999950, 999999, 1000000, 9999500, 9999949,
+                                    999999499, 999999500, 1000000000, 4294967295LL,
+                                    4294967296LL, 9999999999LL, 86400000000000LL,
+                                    9223372036854775807LL};
+    char ours[48], theirs[48];
+    uint64_t seed = 12345;
+    int mismatches = 0;
+
+    printf("utc_format_ns in 32 bits: the same text as in 64\n");
+    for (unsigned index = 0; index < sizeof(edges) / sizeof(edges[0]); index++)
+    {
+        for (int sign = -1; sign <= 1; sign += 2)
+        {
+            int64_t value = sign < 0 && edges[index] == 0 ? 0 : sign * edges[index];
+
+            utc_format_ns(ours, value, true);
+            reference_format_ns(theirs, value, true);
+            mismatches += strcmp(ours, theirs) != 0;
+            utc_format_ns(ours, value, false);
+            reference_format_ns(theirs, value, false);
+            mismatches += strcmp(ours, theirs) != 0;
+        }
+    }
+    // Every scale, at random.
+    for (int round = 0; round < 200000; round++)
+    {
+        int64_t value;
+
+        seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+        value = (int64_t)((seed >> 11) >> (seed % 50U)) * ((seed & 1U) != 0U ? -1 : 1);
+        utc_format_ns(ours, value, (seed & 2U) != 0U);
+        reference_format_ns(theirs, value, (seed & 2U) != 0U);
+        if (strcmp(ours, theirs) != 0 && mismatches++ < 5)
+        {
+            printf("  %lld: \"%s\" vs \"%s\"\n", (long long)value, ours, theirs);
+        }
+    }
+    CHECK(mismatches == 0);
+    utc_format_ns(ours, -9999949, false);
+    CHECK(strcmp(ours, "-10.00 ms") == 0); // 9.999949 to four figures
+    utc_format_ns(ours, 999999500, true);
+    CHECK(strcmp(ours, "+1.000 s") == 0);
+}
+
+
 int main(void)
 {
     every_day();
     validity();
     leap_seconds();
+    nanoseconds();
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;
 }

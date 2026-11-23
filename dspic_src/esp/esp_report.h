@@ -47,9 +47,12 @@ void esp_report_stat_env(SML_STAT_ENV_PAYLOAD *payload);
 // The synchroniser's candidates. epoch_sequence: the latest epoch's.
 void esp_report_stat_sources(uint32_t epoch_sequence, SML_STAT_SOURCES_PAYLOAD *payload);
 
-// Every module, for SML_USER_SHOW SML_SHOW_ALL: what each is doing, or with
-// verbose (SML_SHOW_VERBOSE) its counters and internals too.
-void esp_report_print_all(uint32_t now_ms, bool verbose);
+// An SML_SHOW_* topic queued for printing a piece at a time
+// (console/print_queue.h), the caller having checked for a free place.
+// SML_SHOW_ALL is every module: what each is doing, or with verbose
+// (SML_SHOW_VERBOSE) its counters and internals too. False for a topic it
+// does not know, or the queue full.
+bool esp_report_queue(uint32_t topic, bool verbose);
 // One SML_SHOW_* topic other than SML_SHOW_ALL, printed. False for a topic
 // it does not know.
 bool esp_report_show(uint32_t topic, bool verbose, uint32_t now_ms);

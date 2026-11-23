@@ -2,10 +2,12 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include "../platform/format.h" // our printf (format.h: the library's is slow)
 #include <string.h>
 
 #include "../console/console.h"
 #include "../console/debug.h"
+#include "../console/print_queue.h"
 #include "../drivers/pcf8563.h"
 #include "../drivers/uart1.h"
 #include "../drivers/boot_image.h"
@@ -387,29 +389,62 @@ static uint8_t enter_bootloader(bool *reset)
 }
 
 
+// The last step of a SHOW: its ACK, after the printout it asked for.
+static void answer_show(uint32_t now_ms, uint16_t token, bool verbose)
+{
+    (void)now_ms;
+    (void)verbose;
+    respond(token, SML_USER_SHOW, SML_RESULT_ACK, SML_ERROR_NONE);
+}
+
+
+static void link_step(uint32_t now_ms, uint16_t arg, bool verbose)
+{
+    (void)now_ms;
+    (void)arg;
+    (void)verbose;
+    esp_link_print();
+}
+
+
+/*
+ * SHOW: printed a piece per main-loop pass (console/print_queue.h), then
+ * answered, so the ACK still follows the text. BUSY if the queue cannot take
+ * it (a SHOW ALL takes one place however long, as each section queues the
+ * next).
+ */
+static uint8_t queue_show(uint32_t argument, uint16_t token, bool *answered_later)
+{
+    bool verbose = (argument & SML_SHOW_VERBOSE) != 0U;
+
+    argument &= ~(uint32_t)SML_SHOW_VERBOSE;
+    if (argument >= SML_SHOW_COUNT)
+    {
+        return SML_ERROR_ARGUMENT;
+    }
+    if (print_queue_free() < 3U)
+    {
+        return SML_ERROR_BUSY;
+    }
+    (void)esp_report_queue(argument, verbose);
+    if (argument == SML_SHOW_ALL && verbose)
+    {
+        (void)print_queue_add(link_step, 0, true);
+    }
+    (void)print_queue_add(answer_show, token, false);
+    *answered_later = true;
+    return SML_ERROR_NONE;
+}
+
+
 static uint8_t run_command(const SML_CMD_USER_PAYLOAD *command, uint32_t now_ms, bool *reset,
-                           bool *accepted)
+                           bool *accepted, bool *answered_later)
 {
     uint32_t argument = command->argument;
 
     switch (command->command)
     {
-        case SML_USER_SHOW:
-        {
-            bool verbose = (argument & SML_SHOW_VERBOSE) != 0U;
-
-            argument &= ~(uint32_t)SML_SHOW_VERBOSE;
-            if (argument == SML_SHOW_ALL)
-            {
-                esp_report_print_all(now_ms, verbose);
-                if (verbose)
-                {
-                    esp_link_print();
-                }
-                return SML_ERROR_NONE;
-            }
-            return esp_report_show(argument, verbose, now_ms) ? SML_ERROR_NONE : SML_ERROR_ARGUMENT;
-        }
+        case SML_USER_SHOW: return queue_show(argument, command->token, answered_later);
         case SML_USER_REQUEST_MESSAGE:
             if ((argument >> 16) != 0U)
             {
@@ -439,18 +474,23 @@ static void handle_command(const SmlFrame *frame, uint32_t now_ms)
     uint8_t error;
     bool reset = false;
     bool accepted = false;
+    bool answered_later = false;
 
     (void)sml_decode(sml_message(SML_CLASS_CMD, SML_CMD_USER)->layout, frame->payload, &command);
     stats.commands++;
-    error = run_command(&command, now_ms, &reset, &accepted);
-    respond(command.token, command.command,
-            error != SML_ERROR_NONE ? SML_RESULT_NACK
-            : accepted              ? SML_RESULT_ACCEPTED
-                                    : SML_RESULT_ACK,
-            error);
+    error = run_command(&command, now_ms, &reset, &accepted, &answered_later);
+    if (!answered_later)
+    {
+        respond(command.token, command.command,
+                error != SML_ERROR_NONE ? SML_RESULT_NACK
+                : accepted              ? SML_RESULT_ACCEPTED
+                                        : SML_RESULT_ACK,
+                error);
+    }
     if (reset)
     {
-        flush_text();
+        console_push(); // the library's buffer into the text frame ...
+        flush_text();   // ... and that out
         console_flush();
         system_reset();
     }
