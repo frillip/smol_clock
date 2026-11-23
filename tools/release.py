@@ -63,16 +63,28 @@ Settings for this machine, in tools/release.local.json (not in git):
     "upload_method": "auto",
     "hostkey": "SHA256:...",
     "arduino_cli": "arduino-cli",
+    "arduino_config": "/home/smolbuild/.arduino15/arduino-cli.yaml",
+    "esp32_core": "3.3.12",
     "mplabx": "C:/Program Files/Microchip/MPLABX/v6.20",
-    "make": "make"
+    "make": "make",
+    "pic_build": "mplabx",
+    "xc16": "/opt/microchip/xc16/v2.10",
+    "dfp": "/opt/microchip/packs/dsPIC33E-GM-GP-MC-GU-MU_DFP/1.6.297"
   }
 
 "upload" is the folder the base URL (make_dist.py --base-url) serves, as
 user@host:path. The upload's own settings (ssh_key, upload_method, winscp,
 hostkey) are upload_dist.py's: its help explains them. The rest are
 optional: arduino_cli defaults to the one on
-the PATH, mplabx to the newest MPLAB X installed in its usual place, make
-to MPLAB X's own on Windows and to the PATH's elsewhere. --dry-run prints
+the PATH, arduino_config to arduino-cli's own, esp32_core to the version
+build_esp.py names (tools/build_esp.py builds the ESP: given, the core
+version must be exactly that one), mplabx to the newest MPLAB X installed in its usual place, make
+to MPLAB X's own on Windows and to the PATH's elsewhere. pic_build "xc16"
+builds the PIC projects with XC16 alone (tools/build_pic.py: the same
+commands as MPLAB X's Makefiles, from configurations.xml), with xc16 and dfp
+its folders (build_pic.py finds them in the usual places if not given);
+"mplabx" (the default, until the two are confirmed to give the same hex)
+uses MPLAB X's Makefiles. --dry-run prints
 what would be run and uploaded, and runs and uploads nothing.
 """
 import argparse
@@ -93,18 +105,14 @@ sys.path.insert(0, TOOLS)
 import make_dist  # noqa: E402
 import make_manifest  # noqa: E402
 import run_tests  # noqa: E402
+import build_esp as esp_builder  # noqa: E402
+import build_pic as pic_builder  # noqa: E402
 import upload_dist  # noqa: E402
 
 # On the CI machine the settings live outside the checkout.
 SETTINGS = os.environ.get("SMOL_RELEASE_SETTINGS") or os.path.join(TOOLS, "release.local.json")
 VERSION_HEADERS = ["esp_src/src/version.h", "dspic_src/platform/version.h", "dspic_spl/spl_version.h"]
 RELEASE_WORKFLOW = "release.yml"
-ESP_SKETCH = os.path.join(ROOT, "esp_src")
-ESP_LIBRARIES = os.path.join(ESP_SKETCH, "libraries")
-# ESP32 Dev Module, 16MB flash, the Custom partition scheme (partitions.csv).
-ESP_FQBN = "esp32:esp32:esp32:FlashSize=16M,PartitionScheme=custom"
-ESP_CORE = "esp32:esp32"
-ESP_CORE_SERIES = "3.3."
 PIC_PROJECTS = ["dspic_ipl", "dspic_spl", "dspic_src"]
 # Each component of a release: the version header it is built from, and the
 # project that builds it.
@@ -216,41 +224,34 @@ def pic_tools(settings):
 
 # ---- 3. The builds -------------------------------------------------------------
 
-def check_core(cli):
-    """The esp32 core installed, warned about if not the 3.3 series."""
-    try:
-        listing = json.loads(output([cli, "core", "list", "--json"]))
-    except ValueError:
-        say("warning: could not read arduino-cli's core list")
-        return
-    platforms = listing.get("platforms", listing) if isinstance(listing, dict) else listing
-    for platform in platforms or []:
-        identity = platform.get("id") or platform.get("ID")
-        version = platform.get("installed_version") or platform.get("installed") or ""
-        if identity == ESP_CORE:
-            say("%s %s" % (ESP_CORE, version))
-            if not version.startswith(ESP_CORE_SERIES):
-                say("warning: the firmware is built and run with %sx" % ESP_CORE_SERIES)
-            return
-    raise ReleaseError("arduino-cli has no %s core: arduino-cli core install %s" % (ESP_CORE, ESP_CORE))
-
-
 def build_esp(settings, dry):
-    cli = settings.get("arduino_cli") or "arduino-cli"
-    if not os.path.isfile(cli):
-        cli = need(cli, "arduino-cli, for the ESP build")
-    if not dry:
-        check_core(cli)
-    if not os.path.isfile(os.path.join(ESP_LIBRARIES, "ArduinoJson", "library.properties")) and \
-            not os.path.isdir(os.path.join(ESP_LIBRARIES, "ArduinoJson", "src")):
-        raise ReleaseError("the ESP's libraries are not there: git submodule update --init")
-    # --export-binaries: esp_src/build/esp32.esp32.esp32/, where make_dist.py
-    # looks, as the IDE's "Export Compiled Binary" leaves it.
-    run([cli, "compile", "--fqbn", ESP_FQBN, "--libraries", ESP_LIBRARIES, "--export-binaries",
-         "--warnings", "default", ESP_SKETCH], dry=dry)
+    """tools/build_esp.py, with the release settings' tools and core."""
+    try:
+        cli = esp_builder.find_cli(settings.get("arduino_cli"))
+        config = esp_builder.find_config(settings.get("arduino_config"))
+        if dry:
+            say("$ " + " ".join(esp_builder.compile_command(cli, config)))
+            return
+        esp_builder.build(cli, config, settings.get("esp32_core"), say=say)
+    except esp_builder.BuildError as error:
+        raise ReleaseError(str(error))
 
 
 def build_pic(settings, dry, projects=PIC_PROJECTS):
+    if settings.get("pic_build", "mplabx") == "xc16":
+        try:
+            for project in projects:
+                folder = os.path.join(ROOT, project)
+                device = pic_builder.Project(folder).device
+                xc16 = pic_builder.find_xc16(settings.get("xc16"))
+                dfp = pic_builder.find_dfp(settings.get("dfp"), device)
+                say("%s: XC16 alone (%s, %s)" % (project, xc16, os.path.basename(dfp)))
+                pic_builder.build(folder, xc16, dfp, show=dry)
+        except pic_builder.BuildError as error:
+            raise ReleaseError(str(error))
+        return
+    if settings.get("pic_build", "mplabx") != "mplabx":
+        raise ReleaseError("pic_build is \"mplabx\" or \"xc16\", not %r" % settings["pic_build"])
     generator, make = pic_tools(settings)
     for project in projects:
         folder = os.path.join(ROOT, project)

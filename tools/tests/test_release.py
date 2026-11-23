@@ -289,3 +289,20 @@ class TagTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PicBuildTest(unittest.TestCase):
+    def test_xc16_alone(self):
+        built = []
+        with mock.patch.object(release.pic_builder, "find_xc16", lambda given: "/x/xc16"), \
+                mock.patch.object(release.pic_builder, "find_dfp", lambda given, device: "/p/dfp"), \
+                mock.patch.object(release.pic_builder, "build",
+                                  lambda folder, xc16, dfp, show=False: built.append(
+                                      (os.path.basename(folder), xc16, dfp, show))):
+            release.build_pic({"pic_build": "xc16"}, True, ["dspic_spl", "dspic_src"])
+        self.assertEqual(built, [("dspic_spl", "/x/xc16", "/p/dfp", True),
+                                 ("dspic_src", "/x/xc16", "/p/dfp", True)])
+
+    def test_unknown_builder(self):
+        with self.assertRaises(release.ReleaseError):
+            release.build_pic({"pic_build": "make"}, True, ["dspic_src"])
