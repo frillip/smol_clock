@@ -9,7 +9,8 @@ The board is the ESP32 Dev Module with 16 MB flash and the custom partition
 scheme (esp_src/partitions.csv), the libraries are esp_src/libraries (the
 ArduinoJson submodule among them). --export-binaries leaves the images in
 esp_src/build/esp32.esp32.esp32/, where make_dist.py looks, as the IDE's
-"Export Compiled Binary" does.
+"Export Compiled Binary" does. The build is verbose (--verbose): every
+command arduino-cli runs is shown, as build_pic.py shows XC16's.
 
 The tools: --cli, else "arduino_cli" in the release settings
 (SMOL_RELEASE_SETTINGS, else tools/release.local.json), else arduino-cli on
@@ -117,8 +118,10 @@ def check_core(installed, wanted=None):
 
 
 def compile_command(cli, config=None):
+    # --verbose: every compiler and linker command shown, as build_pic.py does.
     return base(cli, config) + ["compile", "--fqbn", FQBN, "--libraries", LIBRARIES,
-                                "--export-binaries", "--warnings", "default", SKETCH]
+                                "--export-binaries", "--warnings", "default", "--verbose",
+                                SKETCH]
 
 
 def check_libraries():

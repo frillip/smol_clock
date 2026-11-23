@@ -31,7 +31,7 @@ class Command(unittest.TestCase):
         self.assertEqual(build_esp.compile_command("cli"), [
             "cli", "compile", "--fqbn", "esp32:esp32:esp32:FlashSize=16M,PartitionScheme=custom",
             "--libraries", build_esp.LIBRARIES, "--export-binaries", "--warnings", "default",
-            build_esp.SKETCH])
+            "--verbose", build_esp.SKETCH])
 
     def test_with_a_configuration(self):
         command = build_esp.compile_command("cli", "conf.yaml")

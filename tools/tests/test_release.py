@@ -303,6 +303,16 @@ class PicBuildTest(unittest.TestCase):
         self.assertEqual(built, [("dspic_spl", "/x/xc16", "/p/dfp", True),
                                  ("dspic_src", "/x/xc16", "/p/dfp", True)])
 
+    def test_xc16_by_default(self):
+        built = []
+        with mock.patch.object(release.pic_builder, "find_xc16", lambda given: "/x/xc16"), \
+                mock.patch.object(release.pic_builder, "find_dfp", lambda given, device: "/p/dfp"), \
+                mock.patch.object(release.pic_builder, "build",
+                                  lambda folder, xc16, dfp, show=False: built.append(folder)), \
+                mock.patch.object(release, "pic_tools", side_effect=AssertionError("MPLAB X")):
+            release.build_pic({}, True, ["dspic_src"])
+        self.assertEqual(len(built), 1)
+
     def test_unknown_builder(self):
         with self.assertRaises(release.ReleaseError):
             release.build_pic({"pic_build": "make"}, True, ["dspic_src"])

@@ -68,7 +68,7 @@ tools/release.sample.json is a sample, each key explained):
     "esp32_core": "3.3.12",
     "mplabx": "C:/Program Files/Microchip/MPLABX/v6.20",
     "make": "make",
-    "pic_build": "mplabx",
+    "pic_build": "xc16",
     "xc16": "/opt/microchip/xc16/v2.10",
     "dfp": "/opt/microchip/packs/dsPIC33E-GM-GP-MC-GU-MU_DFP/1.6.297"
   }
@@ -81,11 +81,10 @@ the PATH, arduino_config to arduino-cli's own, esp32_core to the version
 build_esp.py names (tools/build_esp.py builds the ESP: given, the core
 version must be exactly that one), mplabx to the newest MPLAB X installed in its usual place, make
 to MPLAB X's own on Windows and to the PATH's elsewhere. pic_build "xc16"
-builds the PIC projects with XC16 alone (tools/build_pic.py: the same
-commands as MPLAB X's Makefiles, from configurations.xml), with xc16 and dfp
-its folders (build_pic.py finds them in the usual places if not given);
-"mplabx" (the default, until the two are confirmed to give the same hex)
-uses MPLAB X's Makefiles. --dry-run prints
+(the default) builds the PIC projects with XC16 alone (tools/build_pic.py:
+the same commands as MPLAB X's Makefiles, from configurations.xml), with xc16
+and dfp its folders (build_pic.py finds them in the usual places if not
+given); "mplabx" uses MPLAB X's own Makefiles, with mplabx and make. --dry-run prints
 what would be run and uploaded, and runs and uploads nothing.
 """
 import argparse
@@ -239,7 +238,7 @@ def build_esp(settings, dry):
 
 
 def build_pic(settings, dry, projects=PIC_PROJECTS):
-    if settings.get("pic_build", "mplabx") == "xc16":
+    if settings.get("pic_build", "xc16") == "xc16":
         try:
             for project in projects:
                 folder = os.path.join(ROOT, project)
@@ -251,7 +250,7 @@ def build_pic(settings, dry, projects=PIC_PROJECTS):
         except pic_builder.BuildError as error:
             raise ReleaseError(str(error))
         return
-    if settings.get("pic_build", "mplabx") != "mplabx":
+    if settings.get("pic_build") != "mplabx":
         raise ReleaseError("pic_build is \"mplabx\" or \"xc16\", not %r" % settings["pic_build"])
     generator, make = pic_tools(settings)
     for project in projects:
