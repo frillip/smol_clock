@@ -1,0 +1,29 @@
+{
+  "_notes": {
+    "about": "A sample of the release settings, for a Linux build machine building the PIC with XC16 alone. Copy it to tools/release.local.json (git ignores that one), or anywhere named by SMOL_RELEASE_SETTINGS, and fill in this machine's values. Keys starting with _ are not read. Only upload is needed: the tools find the rest in the usual places when a key is left out.",
+    "upload": "user@host:/folder serving the release base URL. On rubidium the folder is the path inside the account's chroot.",
+    "ssh_port": "The SSH port, 22 if left out.",
+    "ssh_key": "The upload's private key: OpenSSH for sftp, a PuTTY .ppk for WinSCP. Left out, the agent (or Pageant). ~ is expanded. Keep keys in tools/keys/ (ignored by git) or outside the checkout.",
+    "upload_method": "auto (WinSCP on Windows when installed, else sftp), winscp or sftp.",
+    "winscp": "WinSCP.com, if not in its usual place (Windows only).",
+    "hostkey": "The server's host key fingerprint, SHA256:... as ssh shows it on a first connection. Pinned for both methods; left out, sftp needs the server in known_hosts and WinSCP refuses.",
+    "arduino_cli": "arduino-cli, if not on the PATH.",
+    "arduino_config": "An arduino-cli configuration of its own (where its cores and toolchains live), if not arduino-cli's default.",
+    "esp32_core": "The exact esp32 core version wanted. Left out, build_esp.py's CORE_VERSION is wanted, and another 3.3.x only warns.",
+    "pic_build": "xc16 (tools/build_pic.py, XC16 alone) or mplabx (MPLAB X's Makefiles, the default).",
+    "xc16": "XC16's folder (holding bin/), for pic_build xc16. Left out: /opt/microchip/xc16/v2.10, C:/Program Files/Microchip/xc16/v2.10.",
+    "dfp": "The device family pack's folder (holding xc16/), for pic_build xc16. Left out: the newest under ~/.mchp_packs/Microchip/dsPIC33E-GM-GP-MC-GU-MU_DFP/.",
+    "mplabx": "MPLAB X's folder, for pic_build mplabx. Left out: the newest under /opt/microchip/mplabx/ or C:/Program Files/Microchip/MPLABX/.",
+    "make": "make, for pic_build mplabx. Left out: MPLAB X's own on Windows, the PATH's elsewhere."
+  },
+  "upload": "smolupload@rubidium.darksky.io:/smol_clock/v2plus",
+  "ssh_port": 22,
+  "ssh_key": "~/.ssh/smolupload_ed25519",
+  "upload_method": "sftp",
+  "hostkey": "SHA256:REPLACE-WITH-THE-SERVER-FINGERPRINT",
+  "arduino_cli": "/usr/local/bin/arduino-cli",
+  "esp32_core": "3.3.12",
+  "pic_build": "xc16",
+  "xc16": "/opt/microchip/xc16/v2.10",
+  "dfp": "/opt/microchip/packs/dsPIC33E-GM-GP-MC-GU-MU_DFP/1.6.297"
+}

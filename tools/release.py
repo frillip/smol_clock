@@ -54,7 +54,8 @@ In order, stopping at the first failure:
  8. With --tag, a GitHub release of this commit with the files attached
     (the GitHub CLI, gh). The commit must be on GitHub already.
 
-Settings for this machine, in tools/release.local.json (not in git):
+Settings for this machine, in tools/release.local.json (not in git;
+tools/release.sample.json is a sample, each key explained):
 
   {
     "upload": "user@rubidium.darksky.io:/var/www/smol_clock/v2plus",

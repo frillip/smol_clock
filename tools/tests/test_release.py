@@ -306,3 +306,24 @@ class PicBuildTest(unittest.TestCase):
     def test_unknown_builder(self):
         with self.assertRaises(release.ReleaseError):
             release.build_pic({"pic_build": "make"}, True, ["dspic_src"])
+
+
+class SampleSettingsTest(unittest.TestCase):
+    """tools/release.sample.json: valid, every key noted, and every key the
+    tools read noted there."""
+
+    def test_sample(self):
+        import re
+        with open(os.path.join(release.TOOLS, "release.sample.json")) as handle:
+            sample = json.load(handle)
+        notes = sample["_notes"]
+        for key in sample:
+            if not key.startswith("_"):
+                self.assertIn(key, notes, key)
+        read = set()
+        for name in ("release.py", "upload_dist.py", "build_esp.py", "build_pic.py"):
+            with open(os.path.join(release.TOOLS, name)) as handle:
+                read.update(re.findall(r'settings(?:\(\))?(?:\.get\(|\[)"(\w+)"', handle.read()))
+        read.discard("winscp_hostkey")  # hostkey's older name, still read
+        self.assertEqual(read - set(notes), set())
+        self.assertEqual(set(notes) - {"about"} - read, set())
