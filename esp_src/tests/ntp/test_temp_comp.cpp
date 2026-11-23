@@ -48,15 +48,22 @@ static void test_phase(void)
     CHECK(temp_comp_us(1503 * S) == 495);
     CHECK(temp_comp_us(1002 * S) == 329); // a sample a second back
 
-    printf("Stale: no reading for 15 s, the phase held\n");
+    printf("No reading for 15 s: held, the rate on; for 5 min: lost, the phase kept\n");
     temp_comp_service(1017 * S);
-    CHECK(temp_comp_status()->state == TEMP_COMP_ACTIVE);
+    CHECK(temp_comp_status()->state == TEMP_COMP_ACTIVE && !temp_comp_status()->temperature_held);
     temp_comp_service(1019 * S);
-    CHECK(temp_comp_status()->state == TEMP_COMP_NO_TEMPERATURE && temp_comp_rate_ppb() == 0);
-    int64_t held = temp_comp_us(1019 * S);
-    CHECK(held == 335 && temp_comp_us(5000 * S) == held);
+    CHECK(temp_comp_status()->state == TEMP_COMP_ACTIVE && temp_comp_status()->temperature_held &&
+          temp_comp_rate_ppb() == 330 && temp_comp_us(1019 * S) == 335);
+    temp_comp_service(1003 * S + TEMP_COMP_HOLD_US);
+    CHECK(temp_comp_status()->state == TEMP_COMP_ACTIVE);
+    temp_comp_service(1004 * S + TEMP_COMP_HOLD_US);
+    CHECK(temp_comp_status()->state == TEMP_COMP_NO_TEMPERATURE && temp_comp_rate_ppb() == 0 &&
+          !temp_comp_status()->temperature_held);
+    int64_t held = temp_comp_us(1004 * S + TEMP_COMP_HOLD_US);
+    CHECK(held == 330 + 99 && temp_comp_us(5000 * S) == held); // 301 s more at 330 ppb
     temp_comp_temperature(5000 * S, 2900); // back, colder than the reference
-    CHECK(temp_comp_rate_ppb() == -165 && temp_comp_us(5000 * S) == held);
+    CHECK(temp_comp_rate_ppb() == -165 && temp_comp_us(5000 * S) == held &&
+          !temp_comp_status()->temperature_held);
 
     printf("Settings changed: the phase continuous, the rate from then on\n");
     temp_comp_configure(5000 * S, true, -100);
@@ -260,10 +267,22 @@ static void test_learning(void)
     CHECK(temp_comp_short_polls(5 * 3600 * S) == TEMP_COMP_POLLS_NORMAL &&
           comp->source == TEMP_COMP_SET);
 
-    printf("  Another server, or the temperature lost: the window again\n");
-    temp_comp_learn(12 * 3600 * S + 100, 0, 2000, 2);
+    printf("  A PIC restart's 45 s without a reading: the window kept\n");
+    {
+        int before = comp->window;
+
+        temp_comp_service(12 * 3600 * S + 45 * S);
+        CHECK(comp->temperature_held && comp->state == TEMP_COMP_ACTIVE && comp->window == before);
+        temp_comp_learn(12 * 3600 * S + 50 * S, 0, 2000, 1);
+        CHECK(comp->window == before || comp->window == before + 1);
+        temp_comp_temperature(12 * 3600 * S + 55 * S, comp->temperature_centic);
+        CHECK(!comp->temperature_held && comp->window >= before);
+    }
+
+    printf("  Another server, or the temperature lost for 5 min: the window again\n");
+    temp_comp_learn(12 * 3600 * S + 100 * S, 0, 2000, 2);
     CHECK(comp->window == 1);
-    temp_comp_service(12 * 3600 * S + 20 * S);
+    temp_comp_service(12 * 3600 * S + 100 * S + TEMP_COMP_HOLD_US);
     CHECK(comp->window == 0 && comp->state == TEMP_COMP_NO_TEMPERATURE);
 
     printf("  Restored, set over it, forgotten\n");
@@ -342,16 +361,19 @@ static void test_moving(void)
     hold_at(19400, 19400 + 7200, 3200, 3200);
     CHECK(temp_comp_short_polls((19400 + 7200) * S) == TEMP_COMP_POLLS_NORMAL);
 
-    printf("  Turned off, or the temperature lost: none\n");
+    printf("  Turned off, or the temperature lost: none; held a while: still moving\n");
     int64_t at = 26600;
     hold_at(at, at + 600, 3200, 3275);
     CHECK(comp->moving);
     temp_comp_configure((at + 600) * S, false, TEMP_COMP_NOT_SET);
     CHECK(temp_comp_short_polls((at + 600) * S) == TEMP_COMP_POLLS_NORMAL);
     temp_comp_configure((at + 600) * S, true, TEMP_COMP_NOT_SET);
-    temp_comp_service((at + 620) * S);
+    temp_comp_service((at + 640) * S); // a PIC restart's gap: held
+    CHECK(comp->moving && comp->temperature_held &&
+          temp_comp_short_polls((at + 640) * S) == TEMP_COMP_POLLS_LEARNING);
+    temp_comp_service((at + 600) * S + TEMP_COMP_HOLD_US + 1);
     CHECK(!comp->moving && comp->minutes == 0 &&
-          temp_comp_short_polls((at + 620) * S) == TEMP_COMP_POLLS_NORMAL);
+          temp_comp_short_polls((at + 600) * S + TEMP_COMP_HOLD_US + 1) == TEMP_COMP_POLLS_NORMAL);
 }
 
 

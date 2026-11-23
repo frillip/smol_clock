@@ -226,6 +226,7 @@ void temp_comp_temperature(int64_t local_us, int32_t centic)
         comp.reference_centic = centic;
     }
     comp.temperature_known = true;
+    comp.temperature_held = false;
     comp.temperature_centic = centic;
     comp.temperature_local_us = local_us;
     history_add(local_us, centic);
@@ -235,14 +236,23 @@ void temp_comp_temperature(int64_t local_us, int32_t centic)
 
 void temp_comp_service(int64_t local_us)
 {
-    if (comp.temperature_known && local_us - comp.temperature_local_us > TEMP_COMP_STALE_US)
+    if (!comp.temperature_known)
     {
-        // Held at the rate up to the last reading's staleness, then none.
+        return;
+    }
+    if (local_us - comp.temperature_local_us > TEMP_COMP_HOLD_US)
+    {
+        // Held at the last reading up to now, then none.
         accumulate(local_us);
         comp.temperature_known = false;
+        comp.temperature_held = false;
         update_rate();
-        clear_window(); // the exposure is not known meanwhile
+        clear_window(); // the exposure is not known from here
         history_clear();
+    }
+    else if (local_us - comp.temperature_local_us > TEMP_COMP_STALE_US)
+    {
+        comp.temperature_held = true; // the rate and exposure carry on at it
     }
 }
 

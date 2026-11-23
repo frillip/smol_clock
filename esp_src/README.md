@@ -64,7 +64,7 @@ The console commands and the PIC link have their own, in `tests/commands`: every
 | GPIO18 | GNSS PPS, only with the solder jumpers fitted |
 | GPIO23 | Status LED, lit for 100ms on each ESP PPS edge while NTP is synced, two short flashes while the NTP servers disagree |
 
-Almost everything runs from `loop()`. The exceptions are the NTP exchanges, which run in a task of their own, and the timing edges, which are handled in interrupts. Blocking work such as an HTTPS request holds up `loop()` but nothing else: the ESP PPS carries on in its interrupt, and the 4KB receive buffer on the PIC link holds several seconds of traffic.
+Almost everything runs from `loop()`. The exceptions are the NTP exchanges, which run in a task of their own, and the timing edges, which are handled in interrupts. Blocking work such as an HTTPS request holds up `loop()` but nothing else: the ESP PPS carries on in its interrupt, and the 16KB receive buffer on the PIC link holds several seconds of traffic, or three `pic -v` printouts at full line rate. Receive overflows and line errors are counted (`pic -v`, `UART:`).
 
 # Network
 
@@ -161,7 +161,7 @@ The ESP's crystal moves with temperature, by about -160 to -200 ppb for every de
 
 The ESP corrects for it as it goes ([src/timing/temp_comp.h](src/timing/temp_comp.h)). The board temperature (STAT-ENV) is taken as it arrives, and the crystal is taken to run that many ppb per degree from the temperature first seen since the ESP started. Only the changes matter: what the crystal does at that temperature is the lines' to find, as it always was. NTP samples have the correction taken off before they reach the lines and the clock, and the clock's time has it added back, so between polls the clock follows the temperature at once and the lines see a near enough steady crystal. In a simulated day, 8 C swings over two hours, the error fell from 536 us RMS to 85 us at 512 s polling, and with the coefficient a third out, still to 231 us.
 
-The correction never jumps. No reading for 15 seconds (no BME280, or the PIC silent), compensation turned off, or the coefficient changed, and only its rate changes from then on.
+The correction never jumps. Compensation turned off, the coefficient changed, or the temperature lost, and only its rate changes from then on. A reading not renewed for 15 seconds is held (`esp tcomp` shows `board 31.20 C (held)`): the correction and learning carry on at it for up to 5 minutes, so a PIC restart (30–45 seconds without STAT-ENV, as after an update) loses nothing. After 5 minutes without one (no BME280, or the PIC silent) the temperature is lost: no rate, and the learning window and the movement history start again when it returns.
 
 ### The coefficient, learnt
 
@@ -422,7 +422,7 @@ On the PIC's side, an application started by an unconfirmed SPL that runs health
 
 `pic boot` prints what the SPL reports (its mode, versions, whether the application is valid) when the PIC is in it, or else the application's version, then how the last update went. `pic boot run` and `pic boot hold` send RUN and HOLD to the SPL. After RUN, or when the SPL has sent no BOOT-STATUS for 5 s with no update running, the ESP stops treating the PIC as in its SPL and its link's traffic resumes, which brings the new application's link into SML mode and its STAT-SYS. `update` lists the staged files (`-v` also the SPL slots), and `update erase pic|spl|all` empties their slots (the sector holding each header is erased).
 
-While a download holds up the main loop, the PIC link is still drained between reads (`pic_link_poll()`), so its 4 KB receive buffer does not overflow. A command from the PIC that arrives then is answered BUSY. Bytes are still lost while the ESP erases or writes its flash (the UART's 128-byte FIFO overruns with its interrupt held off, at 921600 baud in under 1.5 ms), so broken frames are expected then. The PIC's raw console text is printed a whole line at a time, and a line holding any byte no console text has (a broken frame's header or payload), or still unfinished when a whole frame arrives, is dropped and counted (`pic -v`, `Text:`). A line that pauses part-way, as the PIC's start-up banner does, is printed whole when it ends. The PIC's terminal controls (the clear screen at its start) are left out.
+While a download holds up the main loop, the PIC link is still drained between reads (`pic_link_poll()`), so its 16 KB receive buffer does not overflow. A command from the PIC that arrives then is answered BUSY. Bytes are still lost while the ESP erases or writes its flash (the UART's 128-byte FIFO overruns with its interrupt held off, at 921600 baud in under 1.5 ms), so broken frames are expected then. The PIC's raw console text is printed a whole line at a time, and a line holding any byte no console text has (a broken frame's header or payload), or still unfinished when a whole frame arrives, is dropped and counted (`pic -v`, `Text:`). A line that pauses part-way, as the PIC's start-up banner does, is printed whole when it ends. The PIC's terminal controls (the clear screen at its start) are left out.
 
 # Telnet
 

@@ -1814,7 +1814,7 @@ static void esp_tcomp(Stream *output, const Entry *entry, const Value *value)
     {
         output->printf(", board ");
         print_centi_value(output, comp->temperature_centic);
-        output->printf(" C");
+        output->printf(comp->temperature_held ? " C (held)" : " C");
     }
     if (comp->reference_known)
     {

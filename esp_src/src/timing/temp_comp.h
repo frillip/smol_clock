@@ -24,8 +24,17 @@
  * the lines and the clock model, and the clock's UTC has it added back, so
  * the model only sees what the compensation does not explain. The phase is
  * continuous: a change of coefficient, compensation turned off, or the
- * temperature lost (no reading for TEMP_COMP_STALE_US) only changes the
- * rate from then on, never the phase so far.
+ * temperature lost only changes the rate from then on, never the phase so
+ * far.
+ *
+ * A reading not renewed for TEMP_COMP_STALE_US is held (temperature_held):
+ * the rate, the exposure and learning carry on at it, up to
+ * TEMP_COMP_HOLD_US. Only then is the temperature lost: no rate, and the
+ * learning window and the movement history cleared. A PIC restart stops
+ * STAT-ENV for 30-45 s (an automatic update at 04:00, 2026-11-23), and
+ * clearing then threw away both clocks' 8 h windows; held, a 45 s gap
+ * with the board 5 C from the reference and moving 0.5 C costs about 2 us
+ * of phase and nothing of the window.
  *
  * Learning: the followed server's raw offsets (the compensation not taken
  * off) over the last TEMP_COMP_LEARN_MAX_AGE_US (at most
@@ -78,7 +87,8 @@
 #define TEMP_COMP_DEFAULT_PPB_PER_C (-180) // + = the crystal runs fast when warmer
 #define TEMP_COMP_MAX_PPB_PER_C     2000
 #define TEMP_COMP_NOT_SET           INT32_MIN  // no coefficient set by hand
-#define TEMP_COMP_STALE_US          15000000LL // STAT-ENV comes every 5 s
+#define TEMP_COMP_STALE_US          15000000LL // STAT-ENV comes every 5 s: held after this ...
+#define TEMP_COMP_HOLD_US           300000000LL // ... and lost after this (a PIC restart is 30-45 s)
 
 #define TEMP_COMP_LEARN_SAMPLES          256 // 8 h at 128 s: ~10 KB
 #define TEMP_COMP_LEARN_MIN_SAMPLES      12
@@ -131,7 +141,8 @@ typedef struct
     int32_t ppb_per_c; // in use
     bool reference_known;
     int32_t reference_centic;   // the first temperature since start
-    bool temperature_known;     // a reading within TEMP_COMP_STALE_US
+    bool temperature_known;     // a reading within TEMP_COMP_HOLD_US
+    bool temperature_held;      // ... but none within TEMP_COMP_STALE_US: the last one held
     int32_t temperature_centic; // the latest
     int64_t temperature_local_us;
     int64_t rate_ppb; // being added to UTC - local's rate now, + = local slow
@@ -166,7 +177,7 @@ void temp_comp_restore(int32_t learnt_ppb_per_c, int32_t estimates);
 void temp_comp_configure(int64_t local_us, bool enabled, int32_t set_ppb_per_c);
 // A board temperature read at local_us, 0.01 C.
 void temp_comp_temperature(int64_t local_us, int32_t centic);
-// Often: lets a temperature not renewed go stale.
+// Often: holds a temperature not renewed, then lets it go.
 void temp_comp_service(int64_t local_us);
 
 // The correction added to UTC - local at local_us, us. local_us may be a
