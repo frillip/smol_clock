@@ -44,6 +44,10 @@ typedef struct
     uint8_t replies;       // good exchanges in the burst
     bool dns_failed;       // set by the caller (ntp.cpp)
     NtpReplyResult last_result;
+    // The server's identity (ntp_packet.h) at the burst's first good reply
+    // and its last: two servers are compared at whichever were nearest.
+    NtpIdentity first;
+    NtpIdentity last;
     char kiss[5];     // kiss code, if the server sent one
     char address[48]; // the server's address as used: 192.0.2.10, 2001:db8::123
 } NtpPollResult;

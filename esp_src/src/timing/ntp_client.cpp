@@ -136,6 +136,11 @@ static bool exchange(struct udp_pcb *pcb, const ip_addr_t *server, EspClockSampl
     sample->root_delay_us = reply.root_delay_us;
     sample->root_dispersion_us = reply.root_dispersion_us;
     sample->stratum = reply.stratum;
+    if (!poll->ok)
+    {
+        poll->first = reply.identity;
+    }
+    poll->last = reply.identity;
     return true;
 }
 

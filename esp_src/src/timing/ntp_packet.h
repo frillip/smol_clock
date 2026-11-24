@@ -27,10 +27,29 @@ typedef enum
     NTP_REPLY_COUNT
 } NtpReplyResult;
 
+/*
+ * What a reply says of the server itself, rather than of the time: one
+ * host gives the same whichever of its addresses answered, so two servers
+ * set by different addresses (IPv4 and IPv6, two names) can be found to be
+ * one (ntp.cpp). The reference timestamp is the server's own last clock
+ * update, to the 2^-32 s: it changes at each, so it can only be the same
+ * from one host, read between two of its updates. The refid alone is not
+ * enough (every GNSS stratum 1 says GPS or PPS), nor the stratum.
+ */
+typedef struct
+{
+    bool valid; // a good reply, with a reference timestamp that can be told apart
+    uint8_t stratum;
+    uint32_t refid;      // as sent, the 4 bytes big-endian
+    uint32_t root_delay; // as sent, NTP short format
+    uint64_t reference;  // as sent, NTP timestamp
+} NtpIdentity;
+
 typedef struct
 {
     uint8_t leap; // leap indicator
     uint8_t stratum;
+    NtpIdentity identity; // valid with NTP_REPLY_OK
     uint32_t root_delay_us;
     uint32_t root_dispersion_us;
     int64_t receive_utc_us;  // T2
@@ -42,6 +61,8 @@ void ntp_packet_request(uint8_t *packet, uint64_t cookie);
 NtpReplyResult ntp_packet_parse(const uint8_t *packet, uint32_t length, uint64_t cookie,
                                 NtpReply *reply);
 const char *ntp_reply_name(NtpReplyResult result);
+// Both valid and the same in every part: from one host.
+bool ntp_identity_same(const NtpIdentity *a, const NtpIdentity *b);
 
 // NTP 64-bit timestamp to Unix microseconds. Era 0 for seconds from
 // 0x80000000 (1968-2036), era 1 below that (2036-2104).

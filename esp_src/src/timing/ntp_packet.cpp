@@ -81,6 +81,10 @@ NtpReplyResult ntp_packet_parse(const uint8_t *packet, uint32_t length, uint64_t
     {
         return NTP_REPLY_UNSYNCHRONISED;
     }
+    reply->identity.stratum = reply->stratum;
+    reply->identity.root_delay = get_u32(packet + 4);
+    reply->identity.refid = get_u32(packet + 12);
+    reply->identity.reference = get_u64(packet + 16);
     reply->root_delay_us = short_to_us(get_u32(packet + 4));
     reply->root_dispersion_us = short_to_us(get_u32(packet + 8));
     receive = get_u64(packet + 32);
@@ -95,7 +99,17 @@ NtpReplyResult ntp_packet_parse(const uint8_t *packet, uint32_t length, uint64_t
     {
         return NTP_REPLY_BAD_TIME;
     }
+    // A reference time of whole seconds (some appliances truncate it, and
+    // update it every second) could be the same from two hosts: not used.
+    reply->identity.valid = (reply->identity.reference & 0xFFFFFFFFULL) != 0;
     return NTP_REPLY_OK;
+}
+
+
+bool ntp_identity_same(const NtpIdentity *a, const NtpIdentity *b)
+{
+    return a->valid && b->valid && a->stratum == b->stratum && a->refid == b->refid &&
+           a->root_delay == b->root_delay && a->reference == b->reference;
 }
 
 

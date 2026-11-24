@@ -15,6 +15,7 @@
 #include "../../src/timing/esp_clock.h"
 #include "../../src/timing/ntp.h"
 #include "../../src/timing/ntp_client.h"
+#include "../../src/timing/ntp_packet.h"
 #include "../../src/timing/temp_comp.h"
 #include "../../src/timing/pps.h"
 
@@ -95,6 +96,10 @@ typedef struct
     int64_t delay_us;
     uint32_t polls;
     const char *kiss; // answers with this kiss-o'-death instead, if set
+    // The host behind the address (0: replies carry no identity), and how
+    // often it updates its own clock, which its reference timestamp says.
+    int host;
+    uint32_t reference_period_s;
 } FakeServer;
 
 static FakeServer fake[10];
@@ -166,6 +171,22 @@ bool ntp_client_poll(const NtpServerAddress *address)
         result.sample.root_delay_us = 1000;
         result.sample.root_dispersion_us = 500;
         result.sample.stratum = 2;
+        if (server->host != 0)
+        {
+            // Every host stratum 2 from the same upstream, the same root
+            // delay: only the reference timestamp tells them apart.
+            uint64_t period = server->reference_period_s != 0 ? server->reference_period_s : 1024;
+            uint64_t phase = (uint64_t)server->host * 37;
+            uint64_t utc_s = (uint64_t)((fake_now_us + TRUTH_US) / 1000000);
+            uint64_t seconds = (utc_s - phase) / period * period + phase + 2208988800ULL;
+
+            result.first.valid = true;
+            result.first.stratum = 2;
+            result.first.refid = 0xC0000201;
+            result.first.root_delay = 0x42;
+            result.first.reference = seconds << 32 | (0x10000000ULL * (uint64_t)server->host + 1);
+            result.last = result.first;
+        }
     }
     ready = true;
     return true;
@@ -444,8 +465,8 @@ int main(void)
     }
 
     printf("A pool name: resolved once, kept, and again only once it fails\n");
-    fake[7] = (FakeServer){true, 0, 2000, 0, NULL};
-    fake[8] = (FakeServer){true, 0, 2000, 0, NULL};
+    fake[7] = (FakeServer){true, 0, 2000, 0, NULL, 0, 0};
+    fake[8] = (FakeServer){true, 0, 2000, 0, NULL, 0, 0};
     fake[6].answers = true;
     user_prefs_set_string(user_prefs_ntp_server(1), "pool.example");
     pool_lookups = 0;
@@ -467,7 +488,7 @@ int main(void)
     CHECK(contains(console, "NTP: poll of pool.example failed"));
 
     printf("Server 0, DHCP's: polled once offered, preferred, disabled\n");
-    fake[9] = (FakeServer){true, 0, 1500, 0, NULL};
+    fake[9] = (FakeServer){true, 0, 1500, 0, NULL, 0, 0};
     user_prefs_ntp_dhcp = NTP_DHCP_ENABLED;
     run_s(300);
     CHECK(fake[9].polls == 0 && contains(sources(), "? 0 dhcp")); // nothing offered yet
@@ -539,8 +560,8 @@ int main(void)
         user_prefs_set_string(user_prefs_ntp_server(index), "");
     }
     user_prefs_set_string(user_prefs.fields.ntp.server, "pool.example");
-    fake[7] = (FakeServer){true, 0, 2000, 0, NULL};
-    fake[8] = (FakeServer){true, 0, 2000, 0, NULL};
+    fake[7] = (FakeServer){true, 0, 2000, 0, NULL, 0, 0};
+    fake[8] = (FakeServer){true, 0, 2000, 0, NULL, 0, 0};
     pool_lookups = 0;
     ntp_init();
     run_s(3000);
@@ -558,8 +579,8 @@ int main(void)
     }
 
     printf("The same address under two numbers: the higher set aside, not polled\n");
-    fake[5] = (FakeServer){true, 0, 2000, 0, NULL};
-    fake[6] = (FakeServer){true, 0, 2000, 0, NULL};
+    fake[5] = (FakeServer){true, 0, 2000, 0, NULL, 0, 0};
+    fake[6] = (FakeServer){true, 0, 2000, 0, NULL, 0, 0};
     user_prefs_set_string(user_prefs.fields.ntp.server, "192.0.2.6");
     user_prefs_set_string(user_prefs_ntp_server(1), "s6.example");
     ntp_init();
@@ -671,8 +692,8 @@ int main(void)
         Stream out;
 
         user_prefs_set_string(user_prefs_ntp_server(1), "s5.example");
-        fake[5] = (FakeServer){true, 0, 2000, 0, NULL};
-        fake[6] = (FakeServer){true, 0, 2000, 0, NULL};
+        fake[5] = (FakeServer){true, 0, 2000, 0, NULL, 0, 0};
+        fake[6] = (FakeServer){true, 0, 2000, 0, NULL, 0, 0};
         ntp_init();
         run_s(3000);
         uint32_t before = fake[5].polls;
@@ -743,8 +764,8 @@ int main(void)
     {
         SML_TIME_NTP_PAYLOAD report;
 
-        fake[5] = (FakeServer){true, 0, 2000, 0, NULL};
-        fake[6] = (FakeServer){true, 5000000, 2000, 0, NULL}; // 5 s off
+        fake[5] = (FakeServer){true, 0, 2000, 0, NULL, 0, 0};
+        fake[6] = (FakeServer){true, 5000000, 2000, 0, NULL, 0, 0}; // 5 s off
         user_prefs_set_string(user_prefs_ntp_server(1), "s6.example");
         ntp_init();
         user_prefs_set_string(user_prefs_ntp_server(1), "s5.example");
@@ -820,6 +841,188 @@ int main(void)
         CHECK(contains(learning.out, "Interval:  128 s (adaptive, at most 1024 s, short: learning, 128 s)"));
         user_prefs_esp_tcomp.learnt_ppb_per_c = 0;
         user_prefs_esp_tcomp.learnt_estimates = 0;
+    }
+
+    printf("Identity from a reply: stratum, refid, root delay, reference time\n");
+    {
+        uint8_t packet[NTP_PACKET_BYTES];
+        uint64_t cookie = 0x0123456789ABCDEFULL;
+        NtpReply reply;
+        NtpReply other;
+
+        memset(packet, 0, sizeof packet);
+        packet[0] = (0U << 6) | (4U << 3) | 4U;
+        packet[1] = 1;
+        packet[7] = 0x42;                         // root delay
+        memcpy(packet + 12, "GPS", 3);            // refid
+        uint64_t reference = (3973000000ULL << 32) | 0x80000000ULL;
+        uint64_t stamps[4] = {reference, cookie, (3973000100ULL << 32) | 1, (3973000100ULL << 32) | 2};
+        for (int field = 0; field < 4; field++)
+        {
+            for (int byte = 0; byte < 8; byte++)
+            {
+                packet[16 + 8 * field + byte] = (uint8_t)(stamps[field] >> (56 - 8 * byte));
+            }
+        }
+        CHECK(ntp_packet_parse(packet, sizeof packet, cookie, &reply) == NTP_REPLY_OK);
+        CHECK(reply.identity.valid && reply.identity.stratum == 1 &&
+              reply.identity.refid == 0x47505300U && reply.identity.root_delay == 0x42 &&
+              reply.identity.reference == reference);
+        CHECK(ntp_packet_parse(packet, sizeof packet, cookie, &other) == NTP_REPLY_OK &&
+              ntp_identity_same(&reply.identity, &other.identity));
+        other.identity.refid = 0x50505300U; // PPS
+        CHECK(!ntp_identity_same(&reply.identity, &other.identity));
+        other = reply;
+        other.identity.reference++;
+        CHECK(!ntp_identity_same(&reply.identity, &other.identity));
+        // A reference time of whole seconds: never used.
+        packet[20] = packet[21] = packet[22] = packet[23] = 0;
+        CHECK(ntp_packet_parse(packet, sizeof packet, cookie, &other) == NTP_REPLY_OK &&
+              !other.identity.valid && !ntp_identity_same(&other.identity, &other.identity));
+    }
+
+    printf("One host at two addresses: the higher number set aside once its replies match\n");
+    {
+        for (int n = 0; n < 10; n++)
+        {
+            fake[n] = (FakeServer){true, 0, 2000, 0, NULL, 0, 0};
+        }
+        fake[5].host = fake[6].host = 1; // one machine, at .5 and .6
+        fake[7].host = 2;                // another, alike in all but its reference time
+        user_prefs_ntp_dhcp = NTP_DHCP_DISABLED;
+        user_prefs_set_string(user_prefs.fields.ntp.server, "s5.example");
+        user_prefs_set_string(user_prefs_ntp_server(1), "s6.example");
+        user_prefs_set_string(user_prefs_ntp_server(2), "s7.example");
+        user_prefs_set_string(user_prefs_ntp_server(3), "");
+        ntp_init();
+        console.clear();
+        run_s(4000);
+        table = sources();
+        CHECK(contains(table, "= 2 s6.example") &&
+              contains(table, "192.0.2.6, same host as server 1\n"));
+        CHECK(contains(console, "is the same host as server 1 (its replies match): not used"));
+        CHECK(!contains(table, "= 3") && !contains(table, "= 1"));
+        CHECK((ntp_servers_in_use() & 0x04) == 0);
+        uint32_t polls_6 = fake[6].polls;
+        run_s(7 * 3600);
+        printf("  192.0.2.6 polled %u times in 7 h, as checks\n", fake[6].polls - polls_6);
+        CHECK(fake[6].polls - polls_6 >= 1 && fake[6].polls - polls_6 <= 2);
+        CHECK(contains(sources(), "= 2 s6.example"));
+        Stream verbose;
+        ntp_print_sources(&verbose, true);
+        CHECK(contains(verbose.out, "; same host as server 1, checked "));
+
+        printf("  A resync and the network coming back: checks out of turn do not count\n");
+        for (int n = 0; n < 4; n++)
+        {
+            ntp_service(false);
+            run_s(30);
+            ntp_resync();
+            run_s(30);
+        }
+        CHECK(contains(sources(), "= 2 s6.example") && !contains(console, "no longer taken"));
+
+        printf("  No longer the same host: polled again after its checks stop matching\n");
+        fake[6].host = 3;
+        console.clear();
+        run_s(4 * 6 * 3600);
+        CHECK(contains(console, "server 2 is no longer taken for the same host as server 1: not "
+                                "matched at its last checks"));
+        CHECK(!contains(sources(), "= 2"));
+
+        printf("  The kept server unreachable: the other polled again, and followed\n");
+        fake[6].host = 1;
+        run_s(4000);
+        CHECK(contains(sources(), "= 2 s6.example"));
+        fake[5].answers = false;
+        fake[7].answers = false;
+        console.clear();
+        run_s(3 * 3600);
+        CHECK(contains(console, "server 2 is no longer taken for the same host as server 1: that "
+                                "one is not reachable"));
+        CHECK(contains(sources(), "* 2 s6.example"));
+
+        printf("  A host updating its reference time every second: never matched\n");
+        for (int n = 5; n <= 7; n++)
+        {
+            fake[n] = (FakeServer){true, 0, 2000, 0, NULL, 0, 0};
+        }
+        fake[5].host = fake[6].host = 1;
+        fake[5].reference_period_s = fake[6].reference_period_s = 1;
+        ntp_init();
+        console.clear();
+        run_s(4 * 3600);
+        CHECK(!contains(sources(), "= 2") && !contains(console, "same host"));
+
+        printf("  A pool name set aside, given another address when looked up again: polled\n");
+        fake[9] = (FakeServer){true, 0, 2000, 0, NULL, 1, 1024};
+        fake[7] = (FakeServer){true, 0, 2000, 0, NULL, 1, 1024}; // the pool's first: the same host
+        fake[8] = (FakeServer){true, 0, 2000, 0, NULL, 2, 1024}; // its second: another
+        user_prefs_set_string(user_prefs.fields.ntp.server, "s9.example");
+        user_prefs_set_string(user_prefs_ntp_server(1), "pool.example");
+        user_prefs_set_string(user_prefs_ntp_server(2), "");
+        pool_lookups = 0;
+        ntp_init();
+        run_s(4000);
+        CHECK(contains(sources(), "= 2 pool.example") &&
+              contains(sources(), "192.0.2.7, same host as server 1\n"));
+        console.clear();
+        ntp_service(false); // the network gone and back: names looked up again
+        run_s(30);
+        CHECK(contains(console, "server 2 is no longer taken for the same host as server 1: its "
+                                "name now gives another address"));
+        run_s(4000);
+        CHECK(!contains(sources(), "= 2") && contains(sources(), "192.0.2.8"));
+        printf("  The kept server a pool name given another address: the other polled again\n");
+        user_prefs_set_string(user_prefs.fields.ntp.server, "pool.example");
+        user_prefs_set_string(user_prefs_ntp_server(1), "s9.example");
+        pool_lookups = 0;
+        ntp_init();
+        run_s(4000);
+        CHECK(contains(sources(), "= 2 s9.example") &&
+              contains(sources(), "192.0.2.9, same host as server 1\n"));
+        console.clear();
+        ntp_service(false);
+        run_s(30);
+        CHECK(contains(console, "server 2 is no longer taken for the same host as server 1: that "
+                                "one now has another address"));
+        CHECK(!contains(sources(), "= 2"));
+        user_prefs_set_string(user_prefs.fields.ntp.server, "s5.example");
+        user_prefs_set_string(user_prefs_ntp_server(1), "s6.example");
+        fake[5].reference_period_s = fake[6].reference_period_s = 1024;
+        ntp_init();
+        run_s(4000);
+
+        printf("  Three servers one host: both higher numbers set aside, as server 1's\n");
+        for (int n = 5; n <= 8; n++)
+        {
+            fake[n] = (FakeServer){true, 0, 2000, 0, NULL, 1, 1024};
+        }
+        fake[8].host = 2;
+        user_prefs_set_string(user_prefs.fields.ntp.server, "s5.example");
+        user_prefs_set_string(user_prefs_ntp_server(1), "s6.example");
+        user_prefs_set_string(user_prefs_ntp_server(2), "s7.example");
+        user_prefs_set_string(user_prefs_ntp_server(3), "s8.example");
+        ntp_init();
+        console.clear();
+        run_s(6000);
+        table = sources();
+        printf("%s", table.c_str());
+        CHECK(contains(table, "192.0.2.6, same host as server 1\n") &&
+              contains(table, "192.0.2.7, same host as server 1\n"));
+        CHECK(!contains(table, "= 4") && !contains(table, "= 1"));
+        CHECK((ntp_servers_in_use() & 0x0C) == 0);
+        user_prefs_set_string(user_prefs_ntp_server(2), "");
+        user_prefs_set_string(user_prefs_ntp_server(3), "");
+        run_s(5);
+
+        printf("  Server 1 changed: the one set aside as its host polled again\n");
+        CHECK(contains(sources(), "= 2 s6.example"));
+        console.clear();
+        user_prefs_set_string(user_prefs.fields.ntp.server, "s7.example");
+        run_s(5);
+        CHECK(contains(console, "server 2 is no longer taken for the same host as server 1: it has "
+                                "changed"));
     }
 
     printf("%d checks, %d failures\n", checks, failures);

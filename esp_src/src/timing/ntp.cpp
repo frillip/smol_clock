@@ -53,6 +53,23 @@ static_assert(ESP_CLOCK_YOUNG_SAMPLES == NTP_STATS_MIN_SAMPLES,
 #define FED_BY_OTHER (-2)
 // A server is usable while one of its last three polls was good ...
 #define REACH_RECENT 0x07U
+// The same host at two addresses (same_host_check): taken for one after
+// SAME_HOST_MATCHES matches at different reference times; then checked once
+// every SAME_HOST_CHECK_S, and polled again after SAME_HOST_MISSES checks in
+// a row that do not match.
+#define SAME_HOST_MATCHES 2U
+#define SAME_HOST_CHECK_S 21600U
+#define SAME_HOST_MISSES  3U
+// A check counts only against the kept server's identity from this recently
+// (it is normally polled just before): one started by a resync, or the
+// network coming back, waits for the kept server's next poll instead.
+#define SAME_HOST_FRESH_S 120U
+
+typedef enum
+{
+    SAME_ADDRESS, // polled at an address a lower-numbered server is polled at
+    SAME_HOST,    // another address, but its replies are that server's host's
+} SameHow;
 
 typedef struct
 {
@@ -94,9 +111,23 @@ typedef struct
     uint32_t good_polls;
     uint32_t fallbacks;
     uint32_t dns_failures;
-    // 1 + the server it is the same address as (a lower number): not polled,
-    // not selected or counted. 0 = none.
+    // 1 + the server it is the same as (a lower number): not selected or
+    // counted, and not polled (but for a same-host check). 0 = none.
     uint8_t same_as;
+    uint8_t same_how; // SameHow
+    // Its identity (ntp_packet.h) at the latest good poll, first and last
+    // reply, and what is known of it being another's host: twin, 1 + the
+    // lower-numbered server matched; matches at different reference times.
+    NtpIdentity id_first;
+    NtpIdentity id_last;
+    int64_t identity_us; // when that poll was handled
+    uint8_t twin;
+    uint8_t twin_matches;
+    uint64_t twin_reference;
+    IPAddress aside_at;     // set aside as SAME_HOST: the address that matched
+    int64_t check_after_us; // ... its next check once this has passed
+    uint8_t check_misses;   // checks in a row that did not match
+    uint32_t checks;
     // Kiss-o'-death: its interval doubled rate_shift times (RATE), and
     // whether it has refused (DENY, RSTR); counts of each code.
     uint8_t rate_shift;
@@ -138,6 +169,9 @@ static Ntp ntp;
 // large, and NtpServer is reset by assignment).
 static NtpStats server_stats[NTP_SLOTS];
 
+static void set_aside(int index, int other, SameHow how);
+static void release_twins_of(int index, const char *why);
+
 static int64_t now_us(void)
 {
     return esp_timer_get_time();
@@ -176,6 +210,7 @@ static void reset_server(int index)
     {
         ntp.fed_by = FED_BY_OTHER;
     }
+    release_twins_of(index, "it has changed");
 }
 
 
@@ -861,6 +896,12 @@ static bool add_to_stats(int index, const EspClockSample *sample, int64_t *off_l
     {
         *off_line_us = sample->offset_us - ntp_stats_offset_at(stats, sample->local_us);
         joined = stats->fitted;
+        if (strcmp(server->stats_address, server->address) != 0)
+        {
+            // Another host, most likely (a pool's next address): any set
+            // aside as this one's host are no longer known to be.
+            release_twins_of(index, "that one now has another address");
+        }
         if (strcmp(server->stats_address, server->address) != 0 ||
             *off_line_us > ESP_CLOCK_STEP_US || *off_line_us < -ESP_CLOCK_STEP_US)
         {
@@ -929,6 +970,208 @@ static bool kissed(NtpServer *server, const char *code)
 }
 
 
+// ---- The same host at two addresses ----------------------------------------------
+
+/*
+ * Two servers whose latest polls carry the same identity (ntp_packet.h):
+ * either's first or last reply against either's, as the polls nearest in
+ * time are. The reference timestamp matched, or 0.
+ */
+static uint64_t identities_match(const NtpServer *a, const NtpServer *b)
+{
+    const NtpIdentity *ours[2] = {&a->id_first, &a->id_last};
+    const NtpIdentity *theirs[2] = {&b->id_first, &b->id_last};
+
+    for (int i = 0; i < 2; i++)
+    {
+        for (int j = 0; j < 2; j++)
+        {
+            if (ntp_identity_same(ours[i], theirs[j]))
+            {
+                return ours[i]->reference;
+            }
+        }
+    }
+    return 0;
+}
+
+
+/*
+ * One host polled at two addresses (its IPv4 and IPv6, two names for one
+ * machine) is one server under two numbers, as a shared address is
+ * (same_address_as): combined at double weight, counted twice towards a
+ * majority. Found by each good poll's identity against every other
+ * server's latest: the same at SAME_HOST_MATCHES different reference times
+ * (each one only from that host, between two of its updates), and the
+ * higher number is set aside as for a shared address. Servers' polls fall
+ * a burst or a few apart, so a match comes within a few polls; a server
+ * whose reference time changes between every two polls is never matched,
+ * and stays as it was. True if index itself was set aside.
+ */
+static bool same_host_check(int index)
+{
+    NtpServer *server = &ntp.servers[index];
+
+    for (int other = 0; other < NTP_SLOTS; other++)
+    {
+        NtpServer *peer = &ntp.servers[other];
+        uint64_t reference;
+
+        if (other == index || !peer->configured || peer->same_as != 0 ||
+            (reference = identities_match(server, peer)) == 0)
+        {
+            continue;
+        }
+        int low = index < other ? index : other;
+        int high = index < other ? other : index;
+        NtpServer *twin = &ntp.servers[high];
+
+        if (twin->twin != 0 && twin->twin < low + 1)
+        {
+            // Already matching a lower number (three or more servers on one
+            // host): kept to that one, so the two do not reset each other.
+            continue;
+        }
+        if (twin->twin != low + 1)
+        {
+            twin->twin = (uint8_t)(low + 1);
+            twin->twin_matches = 1;
+            twin->twin_reference = reference;
+        }
+        else if (reference != twin->twin_reference && twin->twin_matches < UINT8_MAX)
+        {
+            twin->twin_matches++;
+            twin->twin_reference = reference;
+        }
+        if (twin->twin_matches >= SAME_HOST_MATCHES)
+        {
+            set_aside(high, low, SAME_HOST);
+            if (high == index)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+
+// Server index, set aside as the same host as another, polled again.
+static void release_same_host(int index, const char *why)
+{
+    NtpServer *server = &ntp.servers[index];
+
+    ntp_event("server %d is no longer taken for the same host as server %d: %s\n", index,
+              server->same_as - 1, why);
+    server->same_as = 0;
+    server->twin = 0;
+    server->twin_matches = 0;
+    server->check_misses = 0;
+    server->due = true;
+}
+
+
+// Any set aside as the same host as server index, polled again, and any
+// matches towards it forgotten: it has changed or been set aside itself
+// (they are found again, against whichever is kept).
+static void release_twins_of(int index, const char *why)
+{
+    for (int other = 0; other < NTP_SLOTS; other++)
+    {
+        NtpServer *server = &ntp.servers[other];
+
+        if (other != index && server->same_as == index + 1 && server->same_how == SAME_HOST)
+        {
+            release_same_host(other, why);
+        }
+        else if (other != index && server->twin == index + 1)
+        {
+            server->twin = 0; // matches so far: with what it was, not what it is
+            server->twin_matches = 0;
+        }
+    }
+}
+
+
+static void schedule_check(NtpServer *server)
+{
+    int64_t now = now_us();
+
+    server->check_after_us = now + (int64_t)SAME_HOST_CHECK_S * 1000000;
+    // Normally started just after the kept server's next good poll, when
+    // its identity is freshest (handle_poll); this only if it never polls.
+    server->next_poll_us = now + 3LL * SAME_HOST_CHECK_S * 1000000;
+    server->due = false;
+}
+
+
+/*
+ * A check of a server set aside as the same host as another: still that
+ * host if its identity matches the kept server's latest, polled just
+ * before. Polled again (released) once the kept server is no longer
+ * reachable (this address may be the path that works), or after
+ * SAME_HOST_MISSES checks in a row without a match. The check's sample is
+ * not used.
+ */
+static void handle_check(int index, const NtpPollResult *poll)
+{
+    NtpServer *server = &ntp.servers[index];
+    int kept = server->same_as - 1;
+
+    server->last = *poll;
+    server->have_last = true;
+    server->polls++;
+    server->checks++;
+    if (poll->ok)
+    {
+        server->good_polls++;
+        server->id_first = poll->first;
+        server->id_last = poll->last;
+    }
+    if (!reachable(kept, now_us()))
+    {
+        release_same_host(index, "that one is not reachable");
+        return;
+    }
+    if (now_us() - ntp.servers[kept].identity_us > (int64_t)SAME_HOST_FRESH_S * 1000000)
+    {
+        // Not just after the kept server's poll: tells nothing either way.
+        schedule_check(server);
+        server->check_after_us = now_us();
+        return;
+    }
+    if (poll->ok && identities_match(server, &ntp.servers[kept]) != 0)
+    {
+        server->check_misses = 0;
+    }
+    else if (++server->check_misses >= SAME_HOST_MISSES)
+    {
+        release_same_host(index, "not matched at its last checks");
+        return;
+    }
+    schedule_check(server);
+}
+
+
+// After a good poll of server index: those set aside as its host whose
+// check is due, polled next, while its identity is fresh.
+static void start_checks_of(int index)
+{
+    int64_t now = now_us();
+
+    for (int other = 0; other < NTP_SLOTS; other++)
+    {
+        NtpServer *server = &ntp.servers[other];
+
+        if (server->same_as == index + 1 && server->same_how == SAME_HOST &&
+            now >= server->check_after_us)
+        {
+            server->due = true;
+        }
+    }
+}
+
+
 static void handle_poll(int index, const NtpPollResult *poll)
 {
     NtpServer *server = &ntp.servers[index];
@@ -936,6 +1179,11 @@ static void handle_poll(int index, const NtpPollResult *poll)
     EspClockSample sample;
     bool joined;
 
+    if (server->same_as != 0 && server->same_how == SAME_HOST)
+    {
+        handle_check(index, poll);
+        return;
+    }
     server->last = *poll;
     server->have_last = true;
     server->polls++;
@@ -960,11 +1208,25 @@ static void handle_poll(int index, const NtpPollResult *poll)
         ntp_event("poll of %s failed (%s %s)\n", server->host, poll_failure(poll),
                        poll->kiss);
         schedule_next(server, false);
+        if (!reachable(index, now_us()))
+        {
+            // Any set aside as its host: their addresses may be the paths that work.
+            release_twins_of(index, "that one is not reachable");
+        }
         select_server(-1);
         return;
     }
     server->good_polls++;
     server->refused = false;
+    server->id_first = poll->first;
+    server->id_last = poll->last;
+    server->identity_us = now_us();
+    if (same_host_check(index))
+    {
+        select_server(-1);
+        return; // its sample is the other's, and set_aside has scheduled its check
+    }
+    start_checks_of(index);
     if (server->rate_shift != 0 && ++server->good_since_rate >= RATE_EASE_POLLS)
     {
         // Answered at the slower rate for a while: try the next faster one.
@@ -1338,16 +1600,20 @@ static int same_address_as(int index, const IPAddress *address)
 
 // Server index set aside as the same address as server other: its samples
 // and line dropped (they are other's), not polled until that changes.
-static void set_aside(int index, int other)
+static void set_aside(int index, int other, SameHow how)
 {
     NtpServer *server = &ntp.servers[index];
     char name[SERVER_TEXT];
 
-    if (server->same_as == other + 1)
+    if (server->same_as == other + 1 && server->same_how == how)
     {
         return;
     }
     server->same_as = (uint8_t)(other + 1);
+    server->same_how = (uint8_t)how;
+    server->twin = 0;
+    server->twin_matches = 0;
+    server->check_misses = 0;
     snprintf(server->address, sizeof(server->address), "%s",
              server->targets[server->target].toString().c_str());
     server->count = 0;
@@ -1363,7 +1629,22 @@ static void set_aside(int index, int other)
     {
         ntp.fed_by = FED_BY_OTHER;
     }
-    ntp_event("%s is the same address as server %d: not polled\n", server_text(server, name), other);
+    if (how == SAME_HOST)
+    {
+        // Polled now and then (handle_check), to see that it still is.
+        server->aside_at = server->targets[server->target];
+        schedule_check(server);
+        ntp_event("%s is the same host as server %d (its replies match): not used, checked "
+                  "every %u h\n",
+                  server_text(server, name), other, SAME_HOST_CHECK_S / 3600U);
+    }
+    else
+    {
+        ntp_event("%s is the same address as server %d: not polled\n", server_text(server, name),
+                  other);
+    }
+    // Any set aside as this one's host: found again against the one kept.
+    release_twins_of(index, "that one is set aside too");
     if (user_prefs_ntp_offset_us[index] != user_prefs_ntp_offset_us[other])
     {
         // One path, two corrections: server other's is the one used. Not
@@ -1538,17 +1819,25 @@ void ntp_service(bool network_up)
     if (other >= 0)
     {
         // Checked again at its next poll time, in case either has moved.
-        set_aside(index, other);
+        set_aside(index, other, SAME_ADDRESS);
         schedule_next(server, true);
         return;
     }
-    if (server->same_as != 0)
+    if (server->same_as != 0 && server->same_how == SAME_ADDRESS)
     {
         ntp_event("server %d is no longer the same address as server %d\n", index,
                   server->same_as - 1);
         server->same_as = 0;
     }
-    start_poll(index, &server->targets[server->target]);
+    if (server->same_as != 0 && server->same_how == SAME_HOST &&
+        !(server->targets[server->target] == server->aside_at))
+    {
+        // Looked up again (the network came back, the weekly refresh) and
+        // given another address: a pool's, almost certainly another host.
+        // Polled as itself from now, rather than after three checks.
+        release_same_host(index, "its name now gives another address");
+    }
+    start_poll(index, &server->targets[server->target]); // a check, if still set aside as SAME_HOST
 }
 
 
@@ -1742,7 +2031,9 @@ void ntp_print_sources(Stream *output, bool verbose)
         {
             int other = server->same_as - 1;
 
-            output->printf(", as server %d", other);
+            output->printf(server->same_how == SAME_HOST ? ", same host as server %d"
+                                                         : ", as server %d",
+                           other);
             if (user_prefs_ntp_offset_us[index] != user_prefs_ntp_offset_us[other])
             {
                 output->printf(" (its offset %+ld us used, not %+ld)",
@@ -1787,6 +2078,21 @@ void ntp_print_sources(Stream *output, bool verbose)
         if (server->refused)
         {
             output->printf("; REFUSED (%s), not polled", server->refused_code);
+        }
+        if (server->same_as != 0 && server->same_how == SAME_HOST)
+        {
+            output->printf("; same host as server %d, checked %lu times (%u not matched), next "
+                           "in %lu min",
+                           server->same_as - 1, (unsigned long)server->checks,
+                           server->check_misses,
+                           (unsigned long)(server->check_after_us > now_us()
+                                               ? (server->check_after_us - now_us()) / 60000000
+                                               : 0));
+        }
+        else if (server->twin != 0)
+        {
+            output->printf("; replies matched server %d's %u times", server->twin - 1,
+                           server->twin_matches);
         }
         if (server->have_last && !server->last.ok)
         {
