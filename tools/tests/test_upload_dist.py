@@ -48,6 +48,7 @@ class Dist(unittest.TestCase):
         self.scripts = []
         self.reads = []
         self.live = None
+        self.remote = None  # the server's files, by path; None: every file in dist/, as it is
         self.codes = []
 
     def tearDown(self):
@@ -62,12 +63,21 @@ class Dist(unittest.TestCase):
             lines = handle.read().splitlines()
         gets = [line for line in lines if line.lstrip("-").startswith("get ")]
         if gets:
-            # Reading the live manifest: played by the test.
+            # Reading the live manifest, or files back: played by the test.
             self.reads.append(lines)
-            if self.live is not None:
-                local = gets[0].rsplit('"', 2)[1]
-                with open(local, "wb") as handle:
-                    handle.write(self.live)
+            for line in gets:
+                remote, local = line.split('"')[1], line.split('"')[3]
+                if remote.endswith("/manifest.json"):
+                    data = self.live
+                elif self.remote is not None:
+                    data = self.remote.get(remote)
+                else:
+                    tail = remote.split("/v2plus/", 1)[1]
+                    with open(os.path.join(self.dist, *tail.split("/")), "rb") as handle:
+                        data = handle.read()
+                if data is not None:
+                    with open(local, "wb") as handle:
+                        handle.write(data)
             return 0
         self.scripts.append(lines)
         self.ran.append(command)
@@ -217,10 +227,44 @@ class Skipping(Dist):
             self.live = handle.read()
         method, out = self.upload(self.settings(), self.all_named())
         self.assertEqual(self.ran, [])
-        self.assertEqual(len(self.reads), 1)
+        self.assertEqual(len(self.reads), 2)  # the manifest, then the files it offers
         self.assertEqual(self.reads[0], ['-get "/var/www/v2plus/manifest.json" "%s"'
                                          % self.reads[0][0].rsplit('"', 2)[1]])
+        self.assertEqual(len(self.reads[1]), 4)  # every file the manifest names
+        self.assertTrue(all(line.startswith('-get "/var/www/v2plus/') for line in self.reads[1]))
         self.assertIn("nothing to upload", out)
+
+    def remote_as_dist(self, leave_out=(), change=()):
+        self.remote = {}
+        for relative, path in self.files.items():
+            if relative in leave_out:
+                continue
+            with open(path, "rb") as handle:
+                data = handle.read()
+            self.remote["/var/www/v2plus/" + relative] = data[:3] if relative in change else data
+
+    def test_offered_but_not_on_the_server(self):
+        # The manifest offers it, the server has lost it: sent, without --force.
+        self.hashed_manifest()
+        with open(self.manifest, "rb") as handle:
+            self.live = handle.read()
+        self.remote_as_dist(leave_out=["prod/esp-0.3.70.bin"])
+        method, out = self.upload(self.settings(), self.all_named())
+        puts = [line for line in self.scripts[0] if line.startswith("put ")]
+        self.assertEqual(len(puts), 2)
+        self.assertTrue(puts[0].endswith('"/var/www/v2plus/prod/esp-0.3.70.bin"'))
+        self.assertIn("not on the server as offered, sent again: prod/esp-0.3.70.bin", out)
+        self.assertNotIn("nothing to upload", out)
+
+    def test_cut_short_on_the_server(self):
+        self.hashed_manifest()
+        with open(self.manifest, "rb") as handle:
+            self.live = handle.read()
+        self.remote_as_dist(change=["prod/pic-0.3.68.smolpic"])
+        method, out = self.upload(self.settings(), self.all_named())
+        puts = [line for line in self.scripts[0] if line.startswith("put ")]
+        self.assertEqual(len(puts), 2)
+        self.assertTrue(puts[0].endswith('"/var/www/v2plus/prod/pic-0.3.68.smolpic"'))
 
     def test_only_what_changed(self):
         self.hashed_manifest()

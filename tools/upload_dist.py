@@ -14,9 +14,12 @@ leaves the old manifest in place.
 
 Files already there are skipped: the live manifest is read first (an SFTP
 get, no web server needed), and a file it offers at the same path with the
-same SHA-256 as ours is not sent again. A file it does not offer (an install
-hex given by name, say) always goes. When nothing has changed, the manifest
-included, nothing is sent. --force sends everything regardless.
+same SHA-256 as ours is read back too, in one more session, and not sent
+again if the server's copy has that SHA-256. One the manifest offers but
+the server does not have, or has some other copy of (deleted, cut short by
+an upload that failed), is sent. A file the manifest does not offer (an
+install hex given by name, say) always goes. When nothing has changed, the
+manifest included, nothing is sent. --force sends everything regardless.
 
 SFTP only: no shell, no scp, no command run on the server, so an account
 chrooted to internal-sftp will do. The rename over the old manifest is one
@@ -302,6 +305,30 @@ def already_there(target, dist, files, live):
     return found
 
 
+def really_there(method, program, target, runner, dist, files):
+    """Of files (offered by the live manifest), those the server has with
+    our SHA-256: each read back by SFTP in one session (a missing one is
+    allowed to fail) and hashed. The manifest saying so is not enough: a file
+    removed, or left short by a failed upload, would otherwise never be sent
+    again without --force."""
+    if not files:
+        return []
+    script = winscp_script if method == "winscp" else sftp_script
+    folder = tempfile.mkdtemp(prefix="upload_dist")
+    copies = [os.path.join(folder, str(number)) for number in range(len(files))]
+    step = [("get", remote_of(target, dist, path), copy, True) for path, copy in zip(files, copies)]
+    try:
+        # The exit code tells nothing: a missing file fails its line.
+        run_step(method, program, target, "check", script(target, step), False, runner, quiet=True)
+        return [path for path, copy in zip(files, copies)
+                if os.path.isfile(copy) and sha256_of(copy) == sha256_of(path)]
+    finally:
+        for copy in copies:
+            if os.path.exists(copy):
+                os.unlink(copy)
+        os.rmdir(folder)
+
+
 def steps(target, dist, files, manifest, stamp=None):
     """The sessions: upload (folders, files, the manifest beside the old
     one), rename (it over the old one), and the fallback's aside (the old one
@@ -515,11 +542,17 @@ def upload_to(target, method, program, dist, files, manifest, dry, runner, force
     where = ", log %s" % LOG if method == "winscp" else ""
     if not force:
         live, live_bytes = read_live(method, program, target, runner)
-        skipped = already_there(target, dist, files, live)
+        offered = already_there(target, dist, files, live)
+        skipped = really_there(method, program, target, runner, dist, offered)
+        missing = [path for path in offered if path not in skipped]
+        if missing:
+            say("offered by the live manifest but not on the server as offered, sent again: %s"
+                % ", ".join(os.path.relpath(path, dist).replace(os.sep, "/") for path in missing))
         with open(manifest, "rb") as handle:
             same_manifest = live_bytes == handle.read()
         if skipped:
-            say("already there (the live manifest offers them, the same SHA-256): %s" % ", ".join(
+            say("already there (offered by the live manifest and on the server, the same "
+                "SHA-256): %s" % ", ".join(
                 os.path.relpath(path, dist).replace(os.sep, "/") for path in skipped))
         files = [path for path in files if path not in skipped]
         if live is None:
