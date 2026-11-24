@@ -65,7 +65,7 @@ tools/release.sample.json is a sample, each key explained):
     "hostkey": "SHA256:...",
     "arduino_cli": "arduino-cli",
     "arduino_config": "/home/smolbuild/.arduino15/arduino-cli.yaml",
-    "esp32_core": "3.3.12",
+    "esp32_core": "3.3.13",
     "mplabx": "C:/Program Files/Microchip/MPLABX/v6.20",
     "make": "make",
     "pic_build": "xc16",

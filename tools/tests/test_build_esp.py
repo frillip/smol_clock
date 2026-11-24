@@ -42,8 +42,14 @@ class Core(unittest.TestCase):
     def test_the_one_named(self):
         self.assertIsNone(build_esp.check_core(build_esp.CORE_VERSION))
 
-    def test_another_in_the_series_warns(self):
-        self.assertIn("3.3.9", build_esp.check_core("3.3.9"))
+    def test_a_later_one_in_the_series_warns(self):
+        self.assertIn("3.3.14", build_esp.check_core("3.3.14"))
+
+    def test_before_the_minimum_stops_it_even_named(self):
+        for installed, wanted in (("3.3.12", None), ("3.3.9", None), ("3.3.12", "3.3.12")):
+            with self.assertRaises(build_esp.BuildError) as caught:
+                build_esp.check_core(installed, wanted)
+            self.assertIn("needs 3.3.13 or later", str(caught.exception))
 
     def test_another_series_stops_it(self):
         for version in ("3.2.1", "2.0.17", "3.4.0"):
@@ -56,9 +62,9 @@ class Core(unittest.TestCase):
         self.assertIn("core install esp32:esp32@", str(caught.exception))
 
     def test_a_wanted_version_exactly(self):
-        self.assertIsNone(build_esp.check_core("3.3.9", "3.3.9"))
+        self.assertIsNone(build_esp.check_core("3.3.14", "3.3.14"))
         with self.assertRaises(build_esp.BuildError):
-            build_esp.check_core(build_esp.CORE_VERSION, "3.3.9")
+            build_esp.check_core(build_esp.CORE_VERSION, "3.3.14")
 
 
 class WithStandIn(unittest.TestCase):
@@ -105,10 +111,10 @@ class WithStandIn(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "a stand-in script needs a shebang")
     def test_the_settings_name_the_core(self):
         with open(os.environ["SMOL_RELEASE_SETTINGS"], "w") as handle:
-            json.dump({"esp32_core": "3.3.9"}, handle)
+            json.dump({"esp32_core": "3.3.14"}, handle)
         with self.assertRaises(build_esp.BuildError) as caught:
             build_esp.build(self.cli, None, say=lambda text: None)
-        self.assertIn("3.3.9 wanted", str(caught.exception))
+        self.assertIn("3.3.14 wanted", str(caught.exception))
 
     @unittest.skipIf(os.name == "nt", "a stand-in script needs a shebang")
     def test_a_failed_compile(self):

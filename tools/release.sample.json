@@ -9,7 +9,7 @@
     "hostkey": "The server's host key fingerprint, SHA256:... as ssh shows it on a first connection. Pinned for both methods; left out, sftp needs the server in known_hosts and WinSCP refuses.",
     "arduino_cli": "arduino-cli, if not on the PATH.",
     "arduino_config": "An arduino-cli configuration of its own (where its cores and toolchains live), if not arduino-cli's default.",
-    "esp32_core": "The exact esp32 core version wanted. Left out, build_esp.py's CORE_VERSION is wanted, and another 3.3.x only warns.",
+    "esp32_core": "The exact esp32 core version wanted (3.3.13 or later). Left out, build_esp.py's CORE_VERSION is wanted, and a later 3.3.x only warns.",
     "pic_build": "xc16 (tools/build_pic.py, XC16 alone, the default) or mplabx (MPLAB X's own Makefiles).",
     "xc16": "XC16's folder (holding bin/), for pic_build xc16. Left out: /opt/microchip/xc16/v2.10, C:/Program Files/Microchip/xc16/v2.10.",
     "dfp": "The device family pack's folder (holding xc16/), for pic_build xc16. Left out: the newest under ~/.mchp_packs/Microchip/dsPIC33E-GM-GP-MC-GU-MU_DFP/.",
@@ -22,7 +22,7 @@
   "upload_method": "sftp",
   "hostkey": "SHA256:REPLACE-WITH-THE-SERVER-FINGERPRINT",
   "arduino_cli": "/usr/local/bin/arduino-cli",
-  "esp32_core": "3.3.12",
+  "esp32_core": "3.3.13",
   "pic_build": "xc16",
   "xc16": "/opt/microchip/xc16/v2.10",
   "dfp": "/opt/microchip/packs/dsPIC33E-GM-GP-MC-GU-MU_DFP/1.6.297"

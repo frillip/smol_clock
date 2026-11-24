@@ -20,7 +20,8 @@ machine can keep one set for this firmware apart from its own.
 
 The esp32 core: --core (else "esp32_core") is the version wanted, and
 another one installed stops the build. Without either, CORE_VERSION is
-wanted: another 3.3.x is a warning, any other series stops the build.
+wanted: a later 3.3.x is a warning, any other series stops the build. A
+core before CORE_MINIMUM always stops it, even named.
 --print checks nothing and prints the command.
 """
 import argparse
@@ -38,7 +39,12 @@ FQBN = "esp32:esp32:esp32:FlashSize=16M,PartitionScheme=custom"
 CORE = "esp32:esp32"
 # The core the firmware is built and run with (as .github/workflows/ci.yml
 # and tools/ci/setup_caesium.sh install).
-CORE_VERSION = "3.3.12"
+CORE_VERSION = "3.3.13"
+# The earliest that will do: before it, the core's Network.hostByName()
+# cleared lwIP's DNS cache without the TCPIP core lock (arduino-esp32 #13055,
+# fixed by #13092), crashing the ESP whenever a lookup was pending in
+# another task, as the NTP client's are since 2026-11-24.
+CORE_MINIMUM = "3.3.13"
 CORE_INDEX = "https://espressif.github.io/arduino-esp32/package_esp32_index.json"
 
 
@@ -53,6 +59,14 @@ def settings():
         return {}
     with open(path) as handle:
         return json.load(handle)
+
+
+def numbers(version):
+    """3.3.13 -> (3, 3, 13); anything unreadable sorts first."""
+    try:
+        return tuple(int(part) for part in version.split("."))
+    except ValueError:
+        return (0,)
 
 
 def series(version):
@@ -105,6 +119,10 @@ def check_core(installed, wanted=None):
     install = "arduino-cli core install %s@%s" % (CORE, wanted or CORE_VERSION)
     if installed is None:
         raise BuildError("no %s core: %s (index %s)" % (CORE, install, CORE_INDEX))
+    if numbers(wanted or installed) < numbers(CORE_MINIMUM):
+        raise BuildError("%s %s: the firmware needs %s or later (DNS lookups in the NTP task "
+                         "crash earlier cores): arduino-cli core install %s@%s"
+                         % (CORE, wanted or installed, CORE_MINIMUM, CORE, CORE_VERSION))
     if wanted:
         if installed != wanted:
             raise BuildError("%s %s installed, %s wanted: %s" % (CORE, installed, wanted, install))
