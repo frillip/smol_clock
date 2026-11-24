@@ -4,7 +4,7 @@
   make_manifest.py --base-url https://host/path/ [--esp esp_src.ino.bin]
                    [--pic app.smolpic] [--pic-spl spl.smolspl]
                    [--config NAME] [--device MAC ...] [--hardware v2]
-                   [--merge manifest.json] [-o manifest.json]
+                   [--merge manifest.json] [--issued TIME] [-o manifest.json]
 
 Each file's version is read from the file itself, never from its name: the
 PIC's files from their headers (checked whole, as make_image.py does), the
@@ -19,8 +19,15 @@ uploaded as they are.
 same hardware, config and devices, or adds one: a configuration for listed
 devices goes first, any other last, as the ESP takes the first that matches.
 Without -o the manifest is printed.
+
+"issued" records when: the manifest's own, at the top, is when it was last
+written, and each configuration's when it was last built. UTC, as
+2026-11-23T13:51:07Z (so they sort as text). The time now, or
+SOURCE_DATE_EPOCH's (for reproducible builds), or --issued. For tracking:
+the ESP does not read it.
 """
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -36,10 +43,29 @@ ESP_AGENT = re.compile(rb"SMOL CLOCK V2/(\d+\.\d+\.\d+)\x00")
 ESP_IMAGE_MAGIC = 0xE9
 ESP_APP_DESC_MAGIC = 0xABCD5432
 NAME_VERSION = re.compile(r"(\d+\.\d+\.\d+)")
+ISSUED = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
 
 class ManifestError(Exception):
     pass
+
+
+def issued_now(given=None):
+    """The issued time: given (checked), else SOURCE_DATE_EPOCH's, else now."""
+    if given:
+        if not ISSUED.match(given):
+            raise ManifestError("--issued %s: as 2026-11-23T13:51:07Z" % given)
+        return given
+    epoch = os.environ.get("SOURCE_DATE_EPOCH")
+    when = (datetime.datetime.fromtimestamp(int(epoch), datetime.timezone.utc) if epoch else
+            datetime.datetime.now(datetime.timezone.utc))
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def stamped(manifest, issued):
+    """The manifest with its issued time, after format."""
+    rest = {key: value for key, value in manifest.items() if key not in ("format", "issued")}
+    return dict({"format": manifest["format"], "issued": issued}, **rest)
 
 
 def esp_version(data):
@@ -82,7 +108,7 @@ def component(path, base_url, version, notes):
     }
 
 
-def build_entry(args, notes):
+def build_entry(args, notes, issued):
     entry = {"hardware": args.hardware}
     if args.config:
         entry["config"] = args.config
@@ -111,6 +137,7 @@ def build_entry(args, notes):
         notes.append("esp: %s, %d bytes" % (entry["esp"]["version"], entry["esp"]["size"]))
     if not any(key in entry for key in ("esp", "pic", "pic_spl")):
         raise ManifestError("no files given")
+    entry["issued"] = issued
     return entry
 
 
@@ -148,6 +175,8 @@ def main(argv=None):
     parser.add_argument("--config", default="", help="the update config it is for (none: the default)")
     parser.add_argument("--device", action="append", help="a MAC address it is limited to (repeatable)")
     parser.add_argument("--merge", help="an existing manifest to add it to")
+    parser.add_argument("--issued", help="the issued time, as 2026-11-23T13:51:07Z (default: now, "
+                        "or SOURCE_DATE_EPOCH's)")
     parser.add_argument("-o", "--output", help="where to write it (default: print)")
     args = parser.parse_args(argv)
     if not re.match(r"https?://", args.base_url):
@@ -157,13 +186,15 @@ def main(argv=None):
 
     notes = []
     try:
-        entry = build_entry(args, notes)
+        issued = issued_now(args.issued)
+        entry = build_entry(args, notes, issued)
         if args.merge:
             with open(args.merge) as handle:
                 manifest = json.load(handle)
             notes.append(merge(manifest, entry))
         else:
             manifest = {"format": FORMAT, "configurations": [entry]}
+        manifest = stamped(manifest, issued)
     except (ManifestError, OSError, ValueError) as error:
         print("make_manifest: %s" % error, file=sys.stderr)
         return 1

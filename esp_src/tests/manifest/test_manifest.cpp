@@ -92,6 +92,13 @@ int main(void)
     CHECK(select(manifest, "v3", "development", MAC, &entry, why) == MANIFEST_NO_ENTRY);
     CHECK(select(manifest, "v4", "", MAC, &entry, why) == MANIFEST_NO_ENTRY);
 
+    printf("issued times (make_manifest.py's): not read, accepted\n");
+    CHECK(with("\"format\": 2,", "\"format\": 2, \"issued\": \"2026-11-23T13:51:07Z\",", why) ==
+          MANIFEST_OK);
+    CHECK(with("{\"config\": \"development\", \"hardware\": \"v2\", \"devices\"",
+               "{\"config\": \"development\", \"hardware\": \"v2\", \"issued\": "
+               "\"2026-11-23T13:51:07Z\", \"devices\"", why) == MANIFEST_OK);
+
     printf("malformed: refused whole\n");
     CHECK(with("\"format\": 2", "\"format\": 1", why) == MANIFEST_INVALID && strstr(why, "format 1"));
     CHECK(with("\"format\": 2,", "", why) == MANIFEST_INVALID);

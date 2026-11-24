@@ -120,6 +120,35 @@ class MakeManifest(unittest.TestCase):
         self.assertEqual(entries[1]["pic"]["version"], "0.4.2")
         self.assertEqual(entries[2]["config"], "development")
 
+    def test_issued(self):
+        pic = self.write("app.smolpic", app_file(0x000401))
+        manifest = self.write("manifest.json", b"")
+        code, _, err = self.run_tool("--base-url", BASE, "--pic", pic, "--issued",
+                                     "2026-11-20T10:00:00Z", "-o", manifest)
+        self.assertEqual(code, 0, err)
+        self.run_tool("--base-url", BASE, "--pic", pic, "--config", "development", "--issued",
+                      "2026-11-23T13:51:07Z", "--merge", manifest, "-o", manifest)
+        with open(manifest) as handle:
+            text = handle.read()
+        written = json.loads(text)
+        # The manifest's: the last write. Each configuration's: its own build.
+        self.assertEqual(list(written)[:2], ["format", "issued"])
+        self.assertEqual(written["issued"], "2026-11-23T13:51:07Z")
+        self.assertEqual([entry["issued"] for entry in written["configurations"]],
+                         ["2026-11-20T10:00:00Z", "2026-11-23T13:51:07Z"])
+
+    def test_issued_now_or_from_source_date_epoch(self):
+        now = make_manifest.issued_now()
+        self.assertRegex(now, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        os.environ["SOURCE_DATE_EPOCH"] = "1795000000"
+        try:
+            self.assertEqual(make_manifest.issued_now(), "2026-11-18T11:06:40Z")
+        finally:
+            del os.environ["SOURCE_DATE_EPOCH"]
+        pic = self.write("app.smolpic", app_file(0x000401))
+        self.assertEqual(self.run_tool("--base-url", BASE, "--pic", pic, "--issued",
+                                       "yesterday")[0], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
