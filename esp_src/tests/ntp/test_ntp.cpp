@@ -1016,6 +1016,44 @@ int main(void)
         user_prefs_set_string(user_prefs_ntp_server(3), "");
         run_s(5);
 
+        printf("  All five one host: DHCP's server 0 kept, the four set aside\n");
+        for (int n = 4; n <= 8; n++)
+        {
+            fake[n] = (FakeServer){true, 0, 2000, 0, NULL, 1, 1024};
+        }
+        dhcp_address = IPAddress(IPv4, 4);
+        dhcp_offered = true;
+        user_prefs_ntp_dhcp = NTP_DHCP_ENABLED;
+        user_prefs_set_string(user_prefs.fields.ntp.server, "s5.example");
+        user_prefs_set_string(user_prefs_ntp_server(1), "s6.example");
+        user_prefs_set_string(user_prefs_ntp_server(2), "s7.example");
+        user_prefs_set_string(user_prefs_ntp_server(3), "s8.example");
+        ntp_init();
+        console.clear();
+        run_s(6000);
+        table = sources();
+        for (int n = 5; n <= 8; n++)
+        {
+            char row[48];
+            snprintf(row, sizeof row, "192.0.2.%d, same host as server 0\n", n);
+            CHECK(contains(table, row));
+        }
+        CHECK(contains(table, "* 0 dhcp") && ntp_servers_in_use() == 0x01);
+        uint32_t polls_5_to_8 = fake[5].polls + fake[6].polls + fake[7].polls + fake[8].polls;
+        run_s(7 * 3600);
+        printf("  servers 1 to 4 polled %u times in 7 h, as checks\n",
+               fake[5].polls + fake[6].polls + fake[7].polls + fake[8].polls - polls_5_to_8);
+        CHECK(fake[5].polls + fake[6].polls + fake[7].polls + fake[8].polls - polls_5_to_8 <= 8);
+        CHECK(!contains(console, "no longer taken"));
+        user_prefs_ntp_dhcp = NTP_DHCP_DISABLED;
+        dhcp_offered = false;
+        user_prefs_set_string(user_prefs_ntp_server(2), "");
+        user_prefs_set_string(user_prefs_ntp_server(3), "");
+        fake[5].host = fake[6].host = 1;
+        run_s(5);
+        ntp_init();
+        run_s(4000);
+
         printf("  Server 1 changed: the one set aside as its host polled again\n");
         CHECK(contains(sources(), "= 2 s6.example"));
         console.clear();
